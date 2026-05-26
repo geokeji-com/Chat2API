@@ -3,17 +3,17 @@ import fs from 'node:fs'
 import test from 'node:test'
 
 const skillPaths = [
-  'skills/chat2api-management-api/SKILL.md',
-  'skills/chat2api-har-tool-fixture/SKILL.md',
-  'skills/chat2api-tool-client-replay/SKILL.md',
-  'skills/chat2api-provider-model-matrix/SKILL.md',
-  'skills/chat2api-proxy-testing/SKILL.md',
+  { file: 'skills/chat2api-management-api/SKILL.md', name: 'chat2api-management-api' },
+  { file: 'skills/chat2api-har-tool-fixture/SKILL.md', name: 'chat2api-har-tool-fixture' },
+  { file: 'skills/chat2api-tool-client-replay/SKILL.md', name: 'chat2api-tool-client-replay' },
+  { file: 'skills/chat2api-provider-model-matrix/SKILL.md', name: 'chat2api-provider-model-matrix' },
+  { file: 'skills/chat2api-proxy-testing/SKILL.md', name: 'chat2api-proxy-testing' },
 ]
 
 test('versioned Chat2API testing skills exist and have trigger-only descriptions', () => {
-  for (const file of skillPaths) {
+  for (const { file, name } of skillPaths) {
     const text = fs.readFileSync(file, 'utf8')
-    assert.match(text, /^---\nname: [a-z0-9-]+\ndescription: Use when /m, file)
+    assert.match(text, new RegExp(`^---\\nname: ${name}\\ndescription: Use when `, 'm'), file)
     assert.doesNotMatch(text, /T[B]D|FI[X]ME|deferred work/, file)
   }
 })
