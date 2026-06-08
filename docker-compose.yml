@@ -1,0 +1,32 @@
+services:
+  chat2api:
+    build:
+      context: .
+    container_name: chat2api
+    environment:
+      CHAT2API_AUTO_START_PROXY: "true"
+      CHAT2API_PROXY_HOST: "0.0.0.0"
+      CHAT2API_PROXY_PORT: "8080"
+      CHAT2API_DISABLE_GPU: "true"
+      CHAT2API_OPEN_DEVTOOLS: "false"
+      CHAT2API_DISABLE_BACKGROUND_NETWORKING: "true"
+      NO_AT_BRIDGE: "1"
+      # Optional: enable the management API for headless Docker configuration.
+      # CHAT2API_ENABLE_MANAGEMENT_API: "true"
+      # CHAT2API_MANAGEMENT_API_SECRET: "change-me"
+    command:
+      - sh
+      - -lc
+      - |
+        mkdir -p /run/dbus
+        dbus-daemon --system --fork --nopidfile >/dev/null 2>&1 || true
+        exec dbus-run-session -- npm run dev
+    ports:
+      - "8080:8080"
+      - "5173:5173"
+    volumes:
+      - chat2api-data:/root/.chat2api
+    restart: unless-stopped
+
+volumes:
+  chat2api-data:
