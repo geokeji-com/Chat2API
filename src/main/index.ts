@@ -15,6 +15,23 @@ process.on('unhandledRejection', (reason) => {
   console.error('Unhandled Rejection:', reason)
 })
 
+const disableGpu = process.env.CHAT2API_DISABLE_GPU !== 'false'
+
+if (disableGpu) {
+  app.disableHardwareAcceleration()
+  app.commandLine.appendSwitch('disable-gpu')
+  app.commandLine.appendSwitch('disable-gpu-compositing')
+  app.commandLine.appendSwitch('disable-software-rasterizer')
+}
+
+if (process.env.CHAT2API_DISABLE_BACKGROUND_NETWORKING === 'true') {
+  app.commandLine.appendSwitch('disable-background-networking')
+  app.commandLine.appendSwitch('disable-component-update')
+  app.commandLine.appendSwitch('disable-domain-reliability')
+  app.commandLine.appendSwitch('metrics-recording-only')
+  app.commandLine.appendSwitch('no-first-run')
+}
+
 // Workaround for V8 JIT compiler crash on macOS ARM64 (Electron 33 bug)
 // Completely disable JIT compilation to prevent EXC_BAD_ACCESS crashes
 // This trades some performance for stability
@@ -101,7 +118,7 @@ async function setupApp(): Promise<void> {
 
   await loadAppContent(mainWindow)
 
-  if (process.env.NODE_ENV === 'development') {
+  if (process.env.NODE_ENV === 'development' && process.env.CHAT2API_OPEN_DEVTOOLS !== 'false') {
     openDevTools()
   }
 }

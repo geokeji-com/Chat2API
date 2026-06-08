@@ -32,6 +32,61 @@ let proxyServer: ProxyServer | null = null
 let proxyStartTime: number | null = null
 const updaterManager = UpdaterManager.getInstance()
 
+function readBooleanEnv(name: string): boolean | undefined {
+  const value = process.env[name]
+  if (!value) {
+    return undefined
+  }
+
+  const normalized = value.trim().toLowerCase()
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false
+  }
+
+  console.warn(`[App] Ignoring invalid boolean environment variable ${name}=${value}`)
+  return undefined
+}
+
+function readPortEnv(name: string): number | undefined {
+  const value = process.env[name]
+  if (!value) {
+    return undefined
+  }
+
+  const port = Number(value)
+  if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+    return port
+  }
+
+  console.warn(`[App] Ignoring invalid port environment variable ${name}=${value}`)
+  return undefined
+}
+
+function applyRuntimeConfigOverrides(config: AppConfig): AppConfig {
+  const proxyHost = process.env.CHAT2API_PROXY_HOST?.trim() || config.proxyHost
+  const proxyPort = readPortEnv('CHAT2API_PROXY_PORT') ?? config.proxyPort
+  const autoStartProxy = readBooleanEnv('CHAT2API_AUTO_START_PROXY') ?? config.autoStartProxy
+  const enableManagementApi =
+    readBooleanEnv('CHAT2API_ENABLE_MANAGEMENT_API') ?? config.managementApi.enableManagementApi
+  const managementApiSecret =
+    process.env.CHAT2API_MANAGEMENT_API_SECRET?.trim() || config.managementApi.managementApiSecret
+
+  return {
+    ...config,
+    proxyHost,
+    proxyPort,
+    autoStartProxy,
+    managementApi: {
+      ...config.managementApi,
+      enableManagementApi,
+      managementApiSecret,
+    },
+  }
+}
+
 const clearChatsHandlers: Record<string, (provider: Provider, account: Account) => Promise<boolean>> = {
   kimi: async (provider, account) => new KimiAdapter(provider, account).deleteAllChats(),
   qwen: async (provider, account) => new QwenAdapter(provider, account).deleteAllChats(),
@@ -75,7 +130,8 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
   }
 
   // Check if auto-start proxy is needed
-  const config = storeManager.getConfig()
+  const config = applyRuntimeConfigOverrides(storeManager.getConfig())
+  storeManager.setConfig(config)
   if (config.autoStartProxy) {
     console.log('[App] Auto-starting proxy service...')
     const proxyPort = config.proxyPort
