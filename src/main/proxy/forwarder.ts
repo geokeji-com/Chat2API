@@ -464,7 +464,8 @@ export class RequestForwarder {
         transformedRequest.web_search,
         transformedRequest.reasoning_effort,
         transformed.plan,
-        request.model
+        request.model,
+        (messageId) => adapter.createShareLink(sessionId, messageId)
       )
       
       if (request.stream) {

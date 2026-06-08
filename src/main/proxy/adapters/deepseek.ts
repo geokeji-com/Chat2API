@@ -67,8 +67,56 @@ interface ChatCompletionRequest {
   tool_choice?: any
 }
 
+export type DeepSeekMessageId = string | number
+
+export interface DeepSeekShareInfo {
+  provider: 'deepseek'
+  session_id: string
+  message_id?: DeepSeekMessageId
+  message_ids?: DeepSeekMessageId[]
+  conversation_url: string
+  share_url?: string
+  share_id?: string
+  share_error?: string
+}
+
 const tokenCache = new Map<string, TokenInfo>()
-const sessionCache = new Map<string, { sessionId: string; createdAt: number }>()
+
+function toPositiveIntegerMessageId(messageId: DeepSeekMessageId | undefined): number | undefined {
+  if (typeof messageId === 'number') {
+    return Number.isInteger(messageId) && messageId > 0 ? messageId : undefined
+  }
+
+  if (typeof messageId === 'string' && /^\d+$/.test(messageId)) {
+    const parsed = Number(messageId)
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+  }
+
+  return undefined
+}
+
+export function buildDeepSeekShareMessageIds(
+  fetchedMessageIds: DeepSeekMessageId[],
+  fallbackMessageId?: DeepSeekMessageId
+): DeepSeekMessageId[] {
+  const uniqueMessageIds = [...fetchedMessageIds, fallbackMessageId]
+    .filter((messageId): messageId is DeepSeekMessageId =>
+      (typeof messageId === 'string' && messageId.length > 0)
+      || (typeof messageId === 'number' && Number.isFinite(messageId))
+    )
+    .filter((messageId, index, allMessageIds) => allMessageIds.indexOf(messageId) === index)
+
+  if (uniqueMessageIds.length >= 2) {
+    return uniqueMessageIds
+  }
+
+  const numericMessageId = toPositiveIntegerMessageId(uniqueMessageIds[0])
+  if (numericMessageId && numericMessageId > 1) {
+    return [numericMessageId - 1, numericMessageId]
+  }
+
+  return uniqueMessageIds
+}
 
 function generateRandomString(length: number, charset: string = 'alphanumeric'): string {
   const sets = {
@@ -166,12 +214,6 @@ export class DeepSeekAdapter {
   }
 
   private async createSession(): Promise<string> {
-    const cacheKey = this.account.id
-    const cached = sessionCache.get(cacheKey)
-    if (cached && Date.now() - cached.createdAt < 300000) {
-      return cached.sessionId
-    }
-
     const token = await this.acquireToken()
     const result = await axios.post(
       `${DEEPSEEK_API_BASE}/v0/chat_session/create`,
@@ -196,9 +238,119 @@ export class DeepSeekAdapter {
     }
 
     const sessionId = bizData?.chat_session?.id
-    sessionCache.set(cacheKey, { sessionId, createdAt: Date.now() })
-
     return sessionId
+  }
+
+  getConversationUrl(sessionId: string): string {
+    return `https://chat.deepseek.com/a/chat/s/${sessionId}`
+  }
+
+  private async fetchSessionMessageIds(sessionId: string, token: string): Promise<DeepSeekMessageId[]> {
+    const result = await axios.get(
+      `${DEEPSEEK_API_BASE}/v0/chat/history_messages?chat_session_id=${encodeURIComponent(sessionId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...FAKE_HEADERS,
+          Referer: this.getConversationUrl(sessionId),
+        },
+        timeout: 15000,
+        validateStatus: () => true,
+      }
+    )
+
+    if (result.status !== 200) {
+      throw new Error(result.data?.msg || result.data?.data?.biz_msg || `HTTP ${result.status}`)
+    }
+
+    const bizData = result.data?.data?.biz_data || result.data?.biz_data
+    const messages = bizData?.chat_messages
+    if (!Array.isArray(messages)) {
+      return []
+    }
+
+    return messages
+      .map((message: any) => message?.message_id || message?.id)
+      .filter((messageId: unknown): messageId is DeepSeekMessageId =>
+        (typeof messageId === 'string' && messageId.length > 0)
+        || (typeof messageId === 'number' && Number.isFinite(messageId))
+      )
+  }
+
+  async createShareLink(sessionId: string, messageId?: DeepSeekMessageId): Promise<DeepSeekShareInfo> {
+    const conversationUrl = this.getConversationUrl(sessionId)
+
+    try {
+      const token = await this.acquireToken()
+      let fetchedMessageIds: DeepSeekMessageId[] = []
+
+      try {
+        fetchedMessageIds = await this.fetchSessionMessageIds(sessionId, token)
+      } catch (error) {
+        console.warn('[DeepSeek] Failed to fetch session message IDs:', error)
+      }
+
+      const messageIds = buildDeepSeekShareMessageIds(fetchedMessageIds, messageId)
+      if (messageIds.length === 0) {
+        return {
+          provider: 'deepseek',
+          session_id: sessionId,
+          conversation_url: conversationUrl,
+          share_error: 'DeepSeek message IDs were not found',
+        }
+      }
+
+      const result = await axios.post(
+        `${DEEPSEEK_API_BASE}/v0/share/create`,
+        {
+          chat_session_id: sessionId,
+          message_ids: messageIds,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...FAKE_HEADERS,
+            Referer: conversationUrl,
+            Cookie: generateCookie(),
+          },
+          timeout: 15000,
+          validateStatus: () => true,
+        }
+      )
+
+      console.log('[DeepSeek] Create share response:', JSON.stringify(result.data, null, 2))
+
+      const bizData = result.data?.data?.biz_data || result.data?.biz_data
+      const shareId = bizData?.share_id
+      if (result.status !== 200 || !shareId) {
+        return {
+          provider: 'deepseek',
+          session_id: sessionId,
+          message_id: messageId,
+          message_ids: messageIds,
+          conversation_url: conversationUrl,
+          share_error: result.data?.msg || result.data?.data?.biz_msg || `HTTP ${result.status}`,
+        }
+      }
+
+      return {
+        provider: 'deepseek',
+        session_id: sessionId,
+        message_id: messageId,
+        message_ids: messageIds,
+        conversation_url: conversationUrl,
+        share_id: shareId,
+        share_url: `https://chat.deepseek.com/share/${shareId}`,
+      }
+    } catch (error) {
+      return {
+        provider: 'deepseek',
+        session_id: sessionId,
+        message_id: messageId,
+        conversation_url: conversationUrl,
+        share_error: error instanceof Error ? error.message : 'Failed to create DeepSeek share link',
+      }
+    }
   }
 
   async deleteSession(sessionId: string): Promise<boolean> {
@@ -221,9 +373,6 @@ export class DeepSeekAdapter {
 
       const success = result.status === 200 && result.data?.code === 0
       if (success) {
-        // Clear cache
-        const cacheKey = this.account.id
-        sessionCache.delete(cacheKey)
         console.log('[DeepSeek] Session deleted:', sessionId)
       }
       return success
@@ -445,7 +594,6 @@ export class DeepSeekAdapter {
 
       const success = result.status === 200 && result.data?.code === 0
       if (success) {
-        sessionCache.clear()
         console.log('[DeepSeek] All chats deleted')
       }
       return success
@@ -459,14 +607,7 @@ export class DeepSeekAdapter {
     return provider.id === 'deepseek' || provider.apiEndpoint.includes('deepseek.com')
   }
 
-  /**
-   * Clear session cache for a specific account
-   * This should be called when a session is deleted externally (e.g., from web)
-   */
-  static clearSessionCache(accountId: string): void {
-    sessionCache.delete(accountId)
-    console.log('[DeepSeek] Cleared session cache for account:', accountId)
-  }
+  static clearSessionCache(_accountId: string): void {}
 }
 
 export const deepSeekAdapter = {

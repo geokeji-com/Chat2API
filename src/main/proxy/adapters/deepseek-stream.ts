@@ -7,12 +7,22 @@ import { PassThrough } from 'stream'
 import { parseToolCallsFromText } from '../utils/toolParser.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
+import type { DeepSeekMessageId, DeepSeekShareInfo } from './deepseek.ts'
 
 const MODEL_NAME = 'deepseek-chat'
 const SEARCH_CONTROL_MARKER_PATTERN = /^(SEARCH|WEB_SEARCH|SEARCHING)(?:\s+|$)/i
+const INLINE_CITATION_MARKER_PATTERN = /\[citation:(\d+)\]/g
+const STRIP_INLINE_CITATION_MARKER_PATTERN = /\s*\[citation:\d+\]/g
 
 function stripSearchControlMarker(content: string, enabled: boolean): string {
   return enabled ? content.replace(SEARCH_CONTROL_MARKER_PATTERN, '') : content
+}
+
+function formatInlineCitationMarkers(content: string, enabled: boolean, preserveMarkers: boolean): string {
+  if (!enabled) return content
+  return preserveMarkers
+    ? content
+    : content.replace(STRIP_INLINE_CITATION_MARKER_PATTERN, '')
 }
 
 interface StreamChunk {
@@ -20,6 +30,14 @@ interface StreamChunk {
   v?: any
   response_message_id?: string
   o?: string
+}
+
+interface DeepSeekCitation {
+  index: number
+  cite_index: number
+  title: string
+  url: string
+  [key: string]: any
 }
 
 function createBaseChunk(id: string, model: string, created: number) {
@@ -35,7 +53,7 @@ export class DeepSeekStreamHandler {
   private model: string
   private sessionId: string
   private isFirstChunk: boolean = true
-  private messageId: string = ''
+  private messageId: DeepSeekMessageId | undefined
   private currentPath: string = ''
   private searchResults: any[] = []
   private thinkingStarted: boolean = false
@@ -48,6 +66,8 @@ export class DeepSeekStreamHandler {
   private reasoningEffort: string | undefined
   private isDone: boolean = false
   private semanticModel: string
+  private shareInfo?: DeepSeekShareInfo
+  private shareInfoProvider?: (messageId: DeepSeekMessageId | undefined) => Promise<DeepSeekShareInfo | undefined>
 
   constructor(
     model: string,
@@ -56,7 +76,8 @@ export class DeepSeekStreamHandler {
     webSearchEnabled: boolean = false,
     reasoningEffort?: string,
     toolCallingPlan?: ToolCallingPlan,
-    semanticModel?: string
+    semanticModel?: string,
+    shareInfoProvider?: (messageId: DeepSeekMessageId | undefined) => Promise<DeepSeekShareInfo | undefined>
   ) {
     this.model = model
     this.semanticModel = (semanticModel || model).toLowerCase()
@@ -67,10 +88,24 @@ export class DeepSeekStreamHandler {
     this.toolStreamParser = toolCallingPlan?.shouldParseResponse ? new ToolStreamParser(toolCallingPlan) : undefined
     this.webSearchEnabled = webSearchEnabled
     this.reasoningEffort = reasoningEffort
+    this.shareInfoProvider = shareInfoProvider
   }
 
-  getLastMessageId(): string {
+  getLastMessageId(): DeepSeekMessageId | undefined {
     return this.messageId
+  }
+
+  private async attachShareInfo(): Promise<void> {
+    if (!this.shareInfoProvider) return
+
+    try {
+      const shareInfo = await this.shareInfoProvider(this.messageId)
+      if (shareInfo) {
+        this.shareInfo = shareInfo
+      }
+    } catch (error) {
+      console.error('[DeepSeek] Failed to attach share info:', error)
+    }
   }
 
   private isThinkingModel(): boolean {
@@ -95,6 +130,10 @@ export class DeepSeekStreamHandler {
   }
 
   private shouldStripSearchControlMarker(): boolean {
+    return this.webSearchEnabled || this.semanticModel.includes('search')
+  }
+
+  private shouldFormatInlineCitationMarkers(): boolean {
     return this.webSearchEnabled || this.semanticModel.includes('search')
   }
 
@@ -152,7 +191,7 @@ export class DeepSeekStreamHandler {
     }
   }
 
-  private static formatSearchCitations(results: any[]): string {
+  private static createCitationList(results: any[]): DeepSeekCitation[] {
     const seenUrls = new Set<string>()
     return results
       .filter(r => Number.isFinite(r.cite_index) && typeof r.url === 'string' && typeof r.title === 'string')
@@ -162,8 +201,10 @@ export class DeepSeekStreamHandler {
         return true
       })
       .sort((a, b) => a.cite_index - b.cite_index)
-      .map(r => `[${r.cite_index}]: [${r.title}](${r.url})`)
-      .join('\n')
+      .map(r => ({
+        ...r,
+        index: r.cite_index,
+      }))
   }
 
   private parseSSE(data: string): StreamChunk | null {
@@ -174,9 +215,17 @@ export class DeepSeekStreamHandler {
     }
   }
 
-  private createChunk(delta: { role?: string; content?: string; reasoning_content?: string; tool_calls?: any[] }, finishReason?: string): string {
-    return `data: ${JSON.stringify({
-      id: `${this.sessionId}@${this.messageId}`,
+  setShareInfo(shareInfo: DeepSeekShareInfo): void {
+    this.shareInfo = shareInfo
+  }
+
+  private createChunk(
+    delta: { role?: string; content?: string; reasoning_content?: string; tool_calls?: any[] },
+    finishReason?: string,
+    citations: DeepSeekCitation[] = []
+  ): string {
+    const chunk: any = {
+      id: `${this.sessionId}@${this.messageId ?? ''}`,
       model: this.model,
       object: 'chat.completion.chunk',
       choices: [{
@@ -185,7 +234,17 @@ export class DeepSeekStreamHandler {
         finish_reason: finishReason || null,
       }],
       created: this.created,
-    })}\n\n`
+    }
+
+    if (finishReason && this.shareInfo) {
+      chunk.chat2api = this.shareInfo
+    }
+
+    if (finishReason && citations.length > 0) {
+      chunk.citations = citations
+    }
+
+    return `data: ${JSON.stringify(chunk)}\n\n`
   }
 
   async handleStream(stream: NodeJS.ReadableStream): Promise<NodeJS.ReadableStream> {
@@ -207,7 +266,7 @@ export class DeepSeekStreamHandler {
 
         const data = line.slice(5).trim()
         if (data === '[DONE]') {
-          this.handleDone(transStream, isFoldModel, isSearchSilentModel)
+          void this.handleDone(transStream, isFoldModel, isSearchSilentModel)
           return
         }
 
@@ -219,7 +278,7 @@ export class DeepSeekStreamHandler {
     })
 
     stream.on('end', () => {
-      this.handleDone(transStream, isFoldModel, isSearchSilentModel)
+      void this.handleDone(transStream, isFoldModel, isSearchSilentModel)
     })
 
     stream.on('error', (err) => {
@@ -349,9 +408,12 @@ export class DeepSeekStreamHandler {
   ): void {
     const cleanedValue = content.replace(/FINISHED/g, '')
     const filteredForSearch = stripSearchControlMarker(cleanedValue, this.shouldStripSearchControlMarker())
-    const processedContent = isSearchSilentModel
-      ? filteredForSearch.replace(/\[citation:(\d+)\]/g, '')
-      : filteredForSearch.replace(/\[citation:(\d+)\]/g, '[$1]')
+    const shouldFormatInlineCitationMarkers = this.shouldFormatInlineCitationMarkers()
+    const processedContent = formatInlineCitationMarkers(
+      filteredForSearch,
+      isSearchSilentModel || shouldFormatInlineCitationMarkers,
+      !isSearchSilentModel && shouldFormatInlineCitationMarkers
+    )
 
     // For 'content' path, intercept tool calls before text is streamed.
     if ((path === 'content' || path === '') && this.toolStreamParser) {
@@ -416,12 +478,12 @@ export class DeepSeekStreamHandler {
     }
   }
 
-  private handleDone(transStream: PassThrough, isFoldModel: boolean, isSearchSilentModel: boolean): void {
+  private async handleDone(transStream: PassThrough, isFoldModel: boolean, isSearchSilentModel: boolean): Promise<void> {
     if (this.isDone) return
     this.isDone = true
 
     // Flush tool call buffer before finishing
-    const baseChunk = createBaseChunk(`${this.sessionId}@${this.messageId}`, this.model, this.created)
+    const baseChunk = createBaseChunk(`${this.sessionId}@${this.messageId ?? ''}`, this.model, this.created)
     const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
     for (const outChunk of flushChunks) {
       transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
@@ -431,29 +493,27 @@ export class DeepSeekStreamHandler {
       transStream.write(this.createChunk({ content: '</pre></details>' }))
     }
 
-    if (this.searchResults.length > 0 && !isSearchSilentModel) {
-      const citations = DeepSeekStreamHandler.formatSearchCitations(this.searchResults)
-      
-      if (citations) {
-        transStream.write(this.createChunk({ content: `\n\n${citations}` }))
-      }
-    }
+    const citations = isSearchSilentModel
+      ? []
+      : DeepSeekStreamHandler.createCitationList(this.searchResults)
+
+    await this.attachShareInfo()
 
     // Determine finish_reason based on whether we had tool calls
     const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
 
-    transStream.write(this.createChunk({}, finishReason))
+    transStream.write(this.createChunk({}, finishReason, citations))
     transStream.write('data: [DONE]\n\n')
     transStream.end()
     
     // Call end callback
-    this.onEnd?.()
+    void this.onEnd?.()
   }
 
   async handleNonStream(stream: NodeJS.ReadableStream): Promise<any> {
     let accumulatedContent = ''
     let accumulatedThinkingContent = ''
-    let messageId = ''
+    let messageId: DeepSeekMessageId | undefined
     let currentPath = ''
     let accumulatedTokenUsage = 2
     const searchResults: any[] = []
@@ -461,6 +521,11 @@ export class DeepSeekStreamHandler {
     const isFoldModel = this.isFoldModel(isThinkingModel)
     const isSearchSilentModel = this.isSearchSilentModel()
     const shouldStripSearchControlMarker = this.shouldStripSearchControlMarker()
+    const shouldFormatInlineCitationMarkers = this.shouldFormatInlineCitationMarkers()
+    const shouldProcessInlineCitationMarkers =
+      isSearchSilentModel || shouldFormatInlineCitationMarkers
+    const shouldPreserveInlineCitationMarkers =
+      !isSearchSilentModel && shouldFormatInlineCitationMarkers
 
     return new Promise((resolve, reject) => {
       let buffer = ''
@@ -500,6 +565,11 @@ export class DeepSeekStreamHandler {
                   if (fragment.content) {
                     let cleanedFragment = fragment.content.replace(/FINISHED/g, '')
                     cleanedFragment = stripSearchControlMarker(cleanedFragment, shouldStripSearchControlMarker)
+                    cleanedFragment = formatInlineCitationMarkers(
+                      cleanedFragment,
+                      shouldProcessInlineCitationMarkers,
+                      shouldPreserveInlineCitationMarkers
+                    )
                     if (fragment.type === 'THINK') {
                       accumulatedThinkingContent += cleanedFragment
                     } else if (fragment.type === 'ANSWER' || fragment.type === 'RESPONSE') {
@@ -514,6 +584,11 @@ export class DeepSeekStreamHandler {
                   if (fragment.content) {
                     let cleanedFragment = fragment.content.replace(/FINISHED/g, '')
                     cleanedFragment = stripSearchControlMarker(cleanedFragment, shouldStripSearchControlMarker)
+                    cleanedFragment = formatInlineCitationMarkers(
+                      cleanedFragment,
+                      shouldProcessInlineCitationMarkers,
+                      shouldPreserveInlineCitationMarkers
+                    )
                     if (fragment.type === 'THINK') {
                       currentPath = 'thinking'
                       accumulatedThinkingContent += cleanedFragment
@@ -563,6 +638,11 @@ export class DeepSeekStreamHandler {
                 if (Array.isArray(e.v)) {
                   let cleanedValue = e.v.map((v: any) => v.content).join('').replace(/FINISHED/g, '')
                   cleanedValue = stripSearchControlMarker(cleanedValue, shouldStripSearchControlMarker)
+                  cleanedValue = formatInlineCitationMarkers(
+                    cleanedValue,
+                    shouldProcessInlineCitationMarkers,
+                    shouldPreserveInlineCitationMarkers
+                  )
                   if (currentPath === 'thinking') {
                     accumulatedThinkingContent += cleanedValue
                   } else if (currentPath === 'content') {
@@ -575,6 +655,11 @@ export class DeepSeekStreamHandler {
             if (typeof parsed.v === 'string') {
               let cleanedValue = parsed.v.replace(/FINISHED/g, '')
               cleanedValue = stripSearchControlMarker(cleanedValue, shouldStripSearchControlMarker)
+              cleanedValue = formatInlineCitationMarkers(
+                cleanedValue,
+                shouldProcessInlineCitationMarkers,
+                shouldPreserveInlineCitationMarkers
+              )
               if (currentPath === 'thinking') {
                 accumulatedThinkingContent += cleanedValue
               } else if (currentPath === 'content') {
@@ -587,27 +672,28 @@ export class DeepSeekStreamHandler {
         }
       })
 
-      stream.on('end', () => {
+      stream.on('end', async () => {
         // Parse tool calls from accumulated content
         const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
           ? { content: accumulatedContent, toolCalls: [] }
           : parseToolCallsFromText(accumulatedContent)
         const citations = isSearchSilentModel
-          ? ''
-          : DeepSeekStreamHandler.formatSearchCitations(searchResults)
+          ? []
+          : DeepSeekStreamHandler.createCitationList(searchResults)
         const trimmedContent = cleanContent.trim()
-        const contentWithCitations = citations
-          ? (trimmedContent ? `${trimmedContent}\n\n${citations}` : citations)
-          : trimmedContent
 
         const message: any = {
           role: 'assistant',
           reasoning_content: accumulatedThinkingContent.trim() || undefined,
-          content: toolCalls.length > 0 ? null : contentWithCitations,
+          content: toolCalls.length > 0 ? null : trimmedContent,
         }
 
         if (toolCalls.length > 0) {
           message.tool_calls = toolCalls
+        }
+
+        if (citations.length > 0) {
+          message.citations = citations
         }
 
         // Log for debugging
@@ -617,8 +703,10 @@ export class DeepSeekStreamHandler {
           console.log('[DeepSeek] Accumulated content length:', accumulatedContent.length)
         }
 
+        await this.attachShareInfo()
+
         resolve({
-          id: `${this.sessionId}@${messageId}`,
+          id: `${this.sessionId}@${messageId ?? ''}`,
           model: this.model,
           object: 'chat.completion',
           choices: [{
@@ -628,6 +716,7 @@ export class DeepSeekStreamHandler {
           }],
           usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: accumulatedTokenUsage },
           created: this.created,
+          chat2api: this.shareInfo,
         })
       })
 

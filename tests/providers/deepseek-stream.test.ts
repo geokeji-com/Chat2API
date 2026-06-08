@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
+import { readFileSync } from 'node:fs'
 
 import { DeepSeekStreamHandler } from '../../src/main/proxy/adapters/deepseek-stream.ts'
 
@@ -20,7 +21,7 @@ function countMatches(value: string, pattern: RegExp): number {
   return value.match(pattern)?.length ?? 0
 }
 
-test('DeepSeek stream appends citations from HAR fragment results', async () => {
+test('DeepSeek stream returns citations separately from content', async () => {
   const handler = new DeepSeekStreamHandler('deepseek-v4-flash-search', 'session-1', undefined, true)
   const source = sse([
     { response_message_id: '2', model_type: 'default' },
@@ -44,15 +45,37 @@ test('DeepSeek stream appends citations from HAR fragment results', async () => 
       title: '天气样例',
       cite_index: 2,
     }] },
-    { p: 'response/fragments', o: 'APPEND', v: [{ id: 3, type: 'RESPONSE', content: '北京明天天气多云。' }] },
+    { p: 'response/fragments', o: 'APPEND', v: [{ id: 3, type: 'RESPONSE', content: '北京明天天气多云[citation:1][citation:2]。' }] },
   ])
 
   const output = await collect(await handler.handleStream(source))
-  const joined = output.join('')
+  const events = output
+    .join('')
+    .split('\n\n')
+    .filter(Boolean)
+  const joined = events.join('\n')
+  const doneIndex = events.findIndex(event => event === 'data: [DONE]')
+  const finalChunk = JSON.parse(events[doneIndex - 1].slice('data: '.length))
 
-  assert.match(joined, /北京明天天气多云/)
-  assert.match(joined, /\[1\]: \[北京-天气预报\]\(https:\/\/www\.nmc\.cn\/publish\/forecast\/ABJ\/beijing\.html\)/)
-  assert.match(joined, /\[2\]: \[天气样例\]\(https:\/\/example\.com\/weather\)/)
+  assert.match(joined, /北京明天天气多云\[citation:1\]\[citation:2\]。/)
+  assert.doesNotMatch(joined, /\[1\]: \[北京-天气预报\]\(https:\/\/www\.nmc\.cn\/publish\/forecast\/ABJ\/beijing\.html\)/)
+  assert.doesNotMatch(joined, /\[2\]: \[天气样例\]\(https:\/\/example\.com\/weather\)/)
+  assert.deepEqual(finalChunk.citations.map((citation: any) => ({
+    index: citation.index,
+    title: citation.title,
+    url: citation.url,
+  })), [
+    {
+      index: 1,
+      title: '北京-天气预报',
+      url: 'https://www.nmc.cn/publish/forecast/ABJ/beijing.html',
+    },
+    {
+      index: 2,
+      title: '天气样例',
+      url: 'https://example.com/weather',
+    },
+  ])
   assert.match(joined, /data: \[DONE\]/)
 })
 
@@ -75,7 +98,19 @@ test('DeepSeek stream keeps existing cite index when merging duplicate URL witho
   const output = await collect(await handler.handleStream(source))
   const joined = output.join('')
 
-  assert.match(joined, /\[3\]: \[更新天气来源\]\(https:\/\/example\.com\/forecast\)/)
+  const events = joined.split('\n\n').filter(Boolean)
+  const doneIndex = events.findIndex(event => event === 'data: [DONE]')
+  const finalChunk = JSON.parse(events[doneIndex - 1].slice('data: '.length))
+
+  assert.deepEqual(finalChunk.citations.map((citation: any) => ({
+    index: citation.index,
+    title: citation.title,
+    url: citation.url,
+  })), [{
+    index: 3,
+    title: '更新天气来源',
+    url: 'https://example.com/forecast',
+  }])
 })
 
 test('DeepSeek stream keeps existing cite index when duplicate URL has invalid cite index', async () => {
@@ -112,8 +147,26 @@ test('DeepSeek stream keeps existing cite index when duplicate URL has invalid c
   const output = await collect(await handler.handleStream(source))
   const joined = output.join('')
 
-  assert.match(joined, /\[1\]: \[更新空引用\]\(https:\/\/example\.com\/invalid-null\)/)
-  assert.match(joined, /\[2\]: \[更新字符串引用\]\(https:\/\/example\.com\/invalid-string\)/)
+  const events = joined.split('\n\n').filter(Boolean)
+  const doneIndex = events.findIndex(event => event === 'data: [DONE]')
+  const finalChunk = JSON.parse(events[doneIndex - 1].slice('data: '.length))
+
+  assert.deepEqual(finalChunk.citations.map((citation: any) => ({
+    index: citation.index,
+    title: citation.title,
+    url: citation.url,
+  })), [
+    {
+      index: 1,
+      title: '更新空引用',
+      url: 'https://example.com/invalid-null',
+    },
+    {
+      index: 2,
+      title: '更新字符串引用',
+      url: 'https://example.com/invalid-string',
+    },
+  ])
 })
 
 test('DeepSeek stream normalizes camelCase citeIndex search results', async () => {
@@ -131,7 +184,13 @@ test('DeepSeek stream normalizes camelCase citeIndex search results', async () =
   const output = await collect(await handler.handleStream(source))
   const joined = output.join('')
 
-  assert.match(joined, /\[4\]: \[驼峰引用\]\(https:\/\/example\.com\/camel\)/)
+  const events = joined.split('\n\n').filter(Boolean)
+  const doneIndex = events.findIndex(event => event === 'data: [DONE]')
+  const finalChunk = JSON.parse(events[doneIndex - 1].slice('data: '.length))
+
+  assert.equal(finalChunk.citations[0].index, 4)
+  assert.equal(finalChunk.citations[0].title, '驼峰引用')
+  assert.equal(finalChunk.citations[0].url, 'https://example.com/camel')
 })
 
 test('DeepSeek stream handles upstream DONE followed by stream end once', async () => {
@@ -169,7 +228,7 @@ test('DeepSeek search-silent stream suppresses citations', async () => {
   assert.match(joined, /data: \[DONE\]/)
 })
 
-test('DeepSeek non-stream appends HAR fragment citations to content', async () => {
+test('DeepSeek non-stream returns citations separately from content', async () => {
   const handler = new DeepSeekStreamHandler('deepseek-v4-flash-search', 'session-1', undefined, true)
   const source = sse([
     { response_message_id: '2', model_type: 'default' },
@@ -178,13 +237,107 @@ test('DeepSeek non-stream appends HAR fragment citations to content', async () =
       title: '天气样例',
       cite_index: 1,
     }] },
-    { p: 'response/fragments', o: 'APPEND', v: [{ id: 3, type: 'RESPONSE', content: '北京明天天气多云。' }] },
+    { p: 'response/fragments', o: 'APPEND', v: [{ id: 3, type: 'RESPONSE', content: '北京明天天气多云[citation:1]。' }] },
   ])
 
   const response: any = await handler.handleNonStream(source)
 
-  assert.equal(response.choices[0].message.content, '北京明天天气多云。\n\n[1]: [天气样例](https://example.com/weather)')
+  assert.equal(response.choices[0].message.content, '北京明天天气多云[citation:1]。')
+  assert.deepEqual(response.choices[0].message.citations.map((citation: any) => ({
+    index: citation.index,
+    title: citation.title,
+    url: citation.url,
+  })), [{
+    index: 1,
+    title: '天气样例',
+    url: 'https://example.com/weather',
+  }])
+  assert.equal(response.citations, undefined)
   assert.equal(response.choices[0].finish_reason, 'stop')
+})
+
+test('DeepSeek non-stream attaches share metadata', async () => {
+  const handler = new DeepSeekStreamHandler(
+    'deepseek-v4-flash',
+    'session-share',
+    undefined,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    async (messageId) => ({
+      provider: 'deepseek',
+      session_id: 'session-share',
+      message_id: messageId,
+      message_ids: ['user-message', messageId],
+      conversation_url: 'https://chat.deepseek.com/a/chat/s/session-share',
+      share_id: 'share-123',
+      share_url: 'https://chat.deepseek.com/share/share-123',
+    })
+  )
+  const source = sse([
+    { response_message_id: 'assistant-message', model_type: 'default' },
+    { p: 'response/fragments', o: 'APPEND', v: [{ id: 3, type: 'RESPONSE', content: '带分享链接。' }] },
+  ])
+
+  const response: any = await handler.handleNonStream(source)
+
+  assert.equal(response.chat2api.provider, 'deepseek')
+  assert.equal(response.chat2api.session_id, 'session-share')
+  assert.equal(response.chat2api.message_id, 'assistant-message')
+  assert.deepEqual(response.chat2api.message_ids, ['user-message', 'assistant-message'])
+  assert.equal(response.chat2api.conversation_url, 'https://chat.deepseek.com/a/chat/s/session-share')
+  assert.equal(response.chat2api.share_url, 'https://chat.deepseek.com/share/share-123')
+})
+
+test('DeepSeek stream attaches share metadata to final chunk before DONE', async () => {
+  const handler = new DeepSeekStreamHandler(
+    'deepseek-v4-flash',
+    'session-stream-share',
+    undefined,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    async (messageId) => ({
+      provider: 'deepseek',
+      session_id: 'session-stream-share',
+      message_id: messageId,
+      message_ids: ['user-stream', messageId],
+      conversation_url: 'https://chat.deepseek.com/a/chat/s/session-stream-share',
+      share_id: 'share-stream',
+      share_url: 'https://chat.deepseek.com/share/share-stream',
+    })
+  )
+  const source = sse([
+    { response_message_id: 'assistant-stream', model_type: 'default' },
+    { p: 'response/fragments', o: 'APPEND', v: [{ id: 3, type: 'RESPONSE', content: '流式分享链接。' }] },
+  ])
+
+  const output = await collect(await handler.handleStream(source))
+  const events = output
+    .join('')
+    .split('\n\n')
+    .filter(Boolean)
+
+  const doneIndex = events.findIndex(event => event === 'data: [DONE]')
+  assert.ok(doneIndex > 0)
+
+  const finalChunk = JSON.parse(events[doneIndex - 1].slice('data: '.length))
+  assert.equal(finalChunk.choices[0].finish_reason, 'stop')
+  assert.equal(finalChunk.chat2api.provider, 'deepseek')
+  assert.equal(finalChunk.chat2api.session_id, 'session-stream-share')
+  assert.equal(finalChunk.chat2api.message_id, 'assistant-stream')
+  assert.deepEqual(finalChunk.chat2api.message_ids, ['user-stream', 'assistant-stream'])
+  assert.equal(finalChunk.chat2api.share_url, 'https://chat.deepseek.com/share/share-stream')
+})
+
+test('DeepSeek share message IDs include user-assistant pairs when only assistant ID is known', () => {
+  const source = readFileSync('src/main/proxy/adapters/deepseek.ts', 'utf8')
+
+  assert.match(source, /buildDeepSeekShareMessageIds/)
+  assert.match(source, /numericMessageId\s*-\s*1/)
+  assert.match(source, /return \[numericMessageId - 1, numericMessageId\]/)
 })
 
 test('DeepSeek stream handler uses requested alias semantics when actual model is primary', async () => {
@@ -232,7 +385,10 @@ test('DeepSeek non-stream applies batched cite index patches to search results',
 
   const response: any = await handler.handleNonStream(source)
 
-  assert.equal(response.choices[0].message.content, '批量引用已生成。\n\n[1]: [批量引用](https://example.com/batch)')
+  assert.equal(response.choices[0].message.content, '批量引用已生成。')
+  assert.equal(response.choices[0].message.citations[0].index, 1)
+  assert.equal(response.choices[0].message.citations[0].title, '批量引用')
+  assert.equal(response.choices[0].message.citations[0].url, 'https://example.com/batch')
   assert.equal(response.choices[0].finish_reason, 'stop')
 })
 
@@ -249,7 +405,10 @@ test('DeepSeek non-stream returns citation without leading blank lines when cont
 
   const response: any = await handler.handleNonStream(source)
 
-  assert.equal(response.choices[0].message.content, '[1]: [空正文引用](https://example.com/empty)')
+  assert.equal(response.choices[0].message.content, '')
+  assert.equal(response.choices[0].message.citations[0].index, 1)
+  assert.equal(response.choices[0].message.citations[0].title, '空正文引用')
+  assert.equal(response.choices[0].message.citations[0].url, 'https://example.com/empty')
   assert.equal(response.choices[0].finish_reason, 'stop')
 })
 
@@ -272,7 +431,10 @@ test('DeepSeek non-stream keeps existing cite index when duplicate URL has inval
 
   const response: any = await handler.handleNonStream(source)
 
-  assert.equal(response.choices[0].message.content, '引用索引稳定。\n\n[1]: [更新引用](https://example.com/nonstream-invalid)')
+  assert.equal(response.choices[0].message.content, '引用索引稳定。')
+  assert.equal(response.choices[0].message.citations[0].index, 1)
+  assert.equal(response.choices[0].message.citations[0].title, '更新引用')
+  assert.equal(response.choices[0].message.citations[0].url, 'https://example.com/nonstream-invalid')
   assert.equal(response.choices[0].finish_reason, 'stop')
 })
 
@@ -301,6 +463,8 @@ test('DeepSeek non-stream keeps tool call content null when citations are presen
   assert.equal(response.choices[0].message.content, null)
   assert.equal(response.choices[0].finish_reason, 'tool_calls')
   assert.equal(response.choices[0].message.tool_calls.length, 1)
+  assert.equal(response.choices[0].message.citations[0].index, 1)
+  assert.equal(response.choices[0].message.citations[0].url, 'https://example.com/tool')
 })
 
 test('DeepSeek non-search responses preserve search text at fragment start', async () => {
@@ -357,4 +521,12 @@ test('DeepSeek search responses still strip explicit search control markers', as
   const response: any = await handler.handleNonStream(source)
 
   assert.equal(response.choices[0].message.content, '搜索正文。')
+})
+
+test('DeepSeek adapter always creates a fresh provider-side session', () => {
+  const source = readFileSync('src/main/proxy/adapters/deepseek.ts', 'utf8')
+
+  assert.doesNotMatch(source, /sessionCache/)
+  assert.doesNotMatch(source, /Date\.now\(\)\s*-\s*cached\.createdAt/)
+  assert.match(source, /\/v0\/chat_session\/create/)
 })
