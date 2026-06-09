@@ -29,10 +29,10 @@ export function resolveDeepSeekChatOptions(
   }
 }
 
-export type KimiScenario = 'SCENARIO_K2D5' | 'SCENARIO_K2D6'
+export type KimiScenario = 'SCENARIO_K2D5'
 
-export function resolveKimiScenario(model: string): KimiScenario {
-  return model.toLowerCase().includes('k2.6') ? 'SCENARIO_K2D6' : 'SCENARIO_K2D5'
+export function resolveKimiScenario(_model: string): KimiScenario {
+  return 'SCENARIO_K2D5'
 }
 
 export function createKimiChatPayload(options: {
@@ -46,7 +46,9 @@ export function createKimiChatPayload(options: {
   return {
     scenario,
     chat_id: '',
-    tools: options.enableWebSearch ? [{ type: 'TOOL_TYPE_SEARCH', search: {} }] : [],
+    tools: options.enableWebSearch
+      ? [{ type: 'TOOL_TYPE_SEARCH', search: { force: false }, name: '' }]
+      : [],
     message: {
       parent_id: '',
       role: 'user',

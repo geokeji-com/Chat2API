@@ -151,6 +151,7 @@ router.post('/accounts', managementAuthMiddleware, async (ctx: Context) => {
       email: request.email,
       credentials: request.credentials,
       dailyLimit: request.dailyLimit,
+      proxyMode: request.proxyMode,
     })
     
     const maskedAccount = maskCredentials(account)
@@ -202,6 +203,21 @@ router.put('/accounts/:id', managementAuthMiddleware, async (ctx: Context) => {
     
     if (request.dailyLimit !== undefined) {
       updates.dailyLimit = request.dailyLimit
+    }
+
+    if (request.proxyMode !== undefined) {
+      updates.proxyMode = request.proxyMode
+      if (request.proxyMode === 'none') {
+        updates.proxyBinding = undefined
+      }
+    }
+
+    if (request.proxyBinding !== undefined) {
+      updates.proxyBinding = request.proxyBinding
+    }
+
+    if (request.featureConfig !== undefined) {
+      updates.featureConfig = request.featureConfig
     }
     
     const updatedAccount = AccountManager.update(id, updates)

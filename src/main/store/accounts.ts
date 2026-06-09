@@ -57,6 +57,7 @@ export class AccountManager {
     email?: string
     credentials: Record<string, string>
     dailyLimit?: number
+    proxyMode?: Account['proxyMode']
   }): Account {
     // Ensure provider exists before creating account
     storeManager.ensureProviderExists(data.providerId)
@@ -80,6 +81,8 @@ export class AccountManager {
       requestCount: 0,
       todayUsed: 0,
       dailyLimit: data.dailyLimit,
+      proxyMode: data.proxyMode === 'auto' ? 'auto' : 'none',
+      proxyBinding: undefined,
       lastStatusCheck: now,
       lastUsed: now,
     }

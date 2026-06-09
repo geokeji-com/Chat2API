@@ -20,6 +20,11 @@ import {
   createBaseChunk,
   ToolCallState 
 } from '../utils/streamToolHandler'
+import {
+  applyAxiosProxyConfig,
+  createTlsSocketViaProxy,
+  type OutboundProxyContext,
+} from '../proxyTransport'
 
 const AGENT_BASE_URL = 'https://agent.minimaxi.com'
 
@@ -184,10 +189,12 @@ export class MiniMaxAdapter {
   private realUserID: string
   private model: string
   private created: number
+  private outboundProxy?: OutboundProxyContext
 
-  constructor(provider: Provider, account: Account) {
+  constructor(provider: Provider, account: Account, outboundProxy?: OutboundProxyContext) {
     this.provider = provider
     this.account = account
+    this.outboundProxy = outboundProxy
     this.rawToken = account.credentials.token || ''
     this.model = 'MiniMax-M2.7'
     this.created = unixTimestamp()
@@ -257,7 +264,7 @@ export class MiniMaxAdapter {
     const response = await axios.post(
       `${AGENT_BASE_URL}${fullUri}`,
       { uuid: randomUuid },
-      {
+      applyAxiosProxyConfig({
         headers: {
           ...FAKE_HEADERS,
           'Content-Type': 'application/json',
@@ -269,7 +276,7 @@ export class MiniMaxAdapter {
         },
         timeout: 15000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     console.log('[MiniMax] Device register response:', response.status, JSON.stringify(response.data))
@@ -325,7 +332,7 @@ export class MiniMaxAdapter {
 
     console.log('[MiniMax] Request - uuid:', realUserID, 'user_id:', realUserID, 'device_id:', deviceInfo.deviceId)
 
-    return await axios.request({
+    return await axios.request(applyAxiosProxyConfig({
       method,
       url: `${AGENT_BASE_URL}${fullUri}`,
       data,
@@ -340,7 +347,7 @@ export class MiniMaxAdapter {
         'x-signature': signature,
         yy: yy,
       },
-    })
+    }, this.outboundProxy))
   }
 
   private async requestStream(
@@ -377,8 +384,18 @@ export class MiniMaxAdapter {
     console.log('[MiniMax] Query string:', queryStr)
     console.log('[MiniMax] Headers - timestamp:', timestamp, 'signature:', signature.substring(0, 16) + '...', 'yy:', yy.substring(0, 16) + '...')
 
+    const tlsSocket = this.outboundProxy
+      ? await createTlsSocketViaProxy({
+          proxy: this.outboundProxy,
+          host: new URL(AGENT_BASE_URL).hostname,
+          port: 443,
+          timeout: 15000,
+        })
+      : undefined
     const session = await new Promise<ClientHttp2Session>((resolve, reject) => {
-      const session = http2.connect(AGENT_BASE_URL)
+      const session = http2.connect(AGENT_BASE_URL, tlsSocket
+        ? { createConnection: () => tlsSocket }
+        : undefined)
       session.on('connect', () => resolve(session))
       session.on('error', reject)
     })

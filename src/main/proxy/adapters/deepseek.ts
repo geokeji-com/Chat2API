@@ -11,6 +11,7 @@ import { getDeepSeekHash } from '../../lib/challenge'
 import type { Account, Provider } from '../../store/types'
 import { resolveDeepSeekChatOptions } from './providerModelOptions'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles'
+import { applyAxiosProxyConfig, type OutboundProxyContext } from '../proxyTransport'
 
 const DEEPSEEK_API_BASE = 'https://chat.deepseek.com/api'
 
@@ -154,10 +155,12 @@ export class DeepSeekAdapter {
   private provider: Provider
   private account: Account
   private token: string
+  private outboundProxy?: OutboundProxyContext
 
-  constructor(provider: Provider, account: Account) {
+  constructor(provider: Provider, account: Account, outboundProxy?: OutboundProxyContext) {
     this.provider = provider
     this.account = account
+    this.outboundProxy = outboundProxy
     console.log('[DeepSeek] Account credentials:', JSON.stringify(account.credentials, null, 2))
     this.token = account.credentials.token || account.credentials.apiKey || account.credentials.refreshToken || ''
     console.log('[DeepSeek] Using token:', this.token.substring(0, 20) + '...')
@@ -175,14 +178,14 @@ export class DeepSeekAdapter {
 
     console.log('[DeepSeek] Acquiring token...')
     
-    const result = await axios.get(`${DEEPSEEK_API_BASE}/v0/users/current`, {
+    const result = await axios.get(`${DEEPSEEK_API_BASE}/v0/users/current`, applyAxiosProxyConfig({
       headers: {
         Authorization: `Bearer ${this.token}`,
         ...FAKE_HEADERS,
       },
       timeout: 15000,
       validateStatus: () => true,
-    })
+    }, this.outboundProxy))
 
     console.log('[DeepSeek] Token response status:', result.status)
     
@@ -218,7 +221,7 @@ export class DeepSeekAdapter {
     const result = await axios.post(
       `${DEEPSEEK_API_BASE}/v0/chat_session/create`,
       {},
-      {
+      applyAxiosProxyConfig({
         headers: {
           Authorization: `Bearer ${token}`,
           ...FAKE_HEADERS,
@@ -226,7 +229,7 @@ export class DeepSeekAdapter {
         },
         timeout: 15000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     console.log('[DeepSeek] Create session response:', JSON.stringify(result.data, null, 2))
@@ -520,14 +523,50 @@ export class DeepSeekAdapter {
       .replace(/!\[.+\]\(.+\)/g, '')
   }
 
+  private async sendCompletion(options: {
+    token: string
+    sessionId: string
+    parentMessageId: DeepSeekMessageId | null
+    prompt: string
+    modelType: 'default' | 'expert'
+    searchEnabled: boolean
+    thinkingEnabled: boolean
+  }): Promise<AxiosResponse> {
+    const challenge = await this.getChallenge('/api/v0/chat/completion')
+    const challengeAnswer = await this.calculateChallengeAnswer(challenge)
+
+    return axios.post(
+      `${DEEPSEEK_API_BASE}/v0/chat/completion`,
+      {
+        chat_session_id: options.sessionId,
+        parent_message_id: options.parentMessageId,
+        prompt: options.prompt,
+        model_type: options.modelType,
+        ref_file_ids: [],
+        search_enabled: options.searchEnabled,
+        thinking_enabled: options.thinkingEnabled,
+        preempt: false,
+      },
+      applyAxiosProxyConfig({
+        headers: {
+          Authorization: `Bearer ${options.token}`,
+          ...FAKE_HEADERS,
+          Referer: this.getConversationUrl(options.sessionId),
+          Cookie: generateCookie(),
+          'X-Ds-Pow-Response': challengeAnswer,
+        },
+        timeout: 120000,
+        validateStatus: () => true,
+        responseType: 'stream',
+      }, this.outboundProxy)
+    )
+  }
+
   async chatCompletion(request: ChatCompletionRequest): Promise<{ response: AxiosResponse; sessionId: string }> {
     const token = await this.acquireToken()
     
     const sessionId = await this.createSession()
     console.log('[DeepSeek] Created new session:', sessionId)
-    
-    const challenge = await this.getChallenge('/api/v0/chat/completion')
-    const challengeAnswer = await this.calculateChallengeAnswer(challenge)
 
     // Clone messages to avoid modifying original request
     // Note: Tool prompt injection is already handled by Forwarder.transformRequestForPromptToolUse()
@@ -545,33 +584,32 @@ export class DeepSeekAdapter {
       console.log('[DeepSeek] Reasoning mode enabled, effort:', request.reasoning_effort)
     }
 
-    const response = await axios.post(
-      `${DEEPSEEK_API_BASE}/v0/chat/completion`,
-      {
-        chat_session_id: sessionId,
-        parent_message_id: null,
-        prompt,
-        model_type: modelType,
-        ref_file_ids: [],
-        search_enabled: searchEnabled,
-        thinking_enabled: thinkingEnabled,
-        preempt: false,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          ...FAKE_HEADERS,
-          Referer: `https://chat.deepseek.com/a/chat/s/${sessionId}`,
-          Cookie: generateCookie(),
-          'X-Ds-Pow-Response': challengeAnswer,
-        },
-        timeout: 120000,
-        validateStatus: () => true,
-        responseType: 'stream',
-      }
-    )
+    const response = await this.sendCompletion({
+      token,
+      sessionId,
+      parentMessageId: null,
+      prompt,
+      modelType,
+      searchEnabled,
+      thinkingEnabled,
+    })
 
     return { response, sessionId }
+  }
+
+  async sendFollowUp(sessionId: string, parentMessageId: DeepSeekMessageId, prompt: string, model: string): Promise<AxiosResponse> {
+    const token = await this.acquireToken()
+    const { modelType } = resolveDeepSeekChatOptions({ model }, prompt)
+
+    return this.sendCompletion({
+      token,
+      sessionId,
+      parentMessageId,
+      prompt: `<｜User｜>${prompt}`,
+      modelType,
+      searchEnabled: false,
+      thinkingEnabled: false,
+    })
   }
 
   async deleteAllChats(): Promise<boolean> {

@@ -6,6 +6,7 @@
 import axios, { AxiosResponse } from 'axios'
 import { Account, Provider } from '../../store/types'
 import { PassThrough } from 'stream'
+import { createHash } from 'crypto'
 import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected } from '../utils/tools'
 import { parseToolCallsFromText } from '../utils/toolParser'
 import { createBaseChunk } from '../utils/streamToolHandler'
@@ -13,6 +14,7 @@ import { createKimiChatPayload, encodeKimiGrpcFrame } from './providerModelOptio
 import { getProviderToolProfile } from '../toolCalling/providerProfiles'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
 import type { ToolCallingPlan } from '../toolCalling/types'
+import { applyAxiosProxyConfig, type OutboundProxyContext } from '../proxyTransport'
 
 const KIMI_API_BASE = 'https://www.kimi.com'
 
@@ -23,6 +25,8 @@ const FAKE_HEADERS: Record<string, string> = {
   'Cache-Control': 'no-cache',
   Pragma: 'no-cache',
   Origin: KIMI_API_BASE,
+  Referer: `${KIMI_API_BASE}/`,
+  'R-Timezone': 'Asia/Shanghai',
   'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
   'Sec-Ch-Ua-Mobile': '?0',
   'Sec-Ch-Ua-Platform': '"Windows"',
@@ -31,6 +35,7 @@ const FAKE_HEADERS: Record<string, string> = {
   'Sec-Fetch-Site': 'same-origin',
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
   Priority: 'u=1, i',
+  'X-Msh-Platform': 'web',
 }
 
 interface TokenInfo {
@@ -49,6 +54,7 @@ interface KimiMessage {
 
 interface ChatCompletionRequest {
   model: string
+  originalModel?: string
   messages: KimiMessage[]
   stream?: boolean
   temperature?: number
@@ -62,31 +68,70 @@ interface ChatCompletionRequest {
 
 const accessTokenMap = new Map<string, TokenInfo>()
 
+function decodeBase64Url(value: string): string {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/')
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
+  return Buffer.from(padded, 'base64').toString('utf8')
+}
+
+function parseJwtPayload(token: string): Record<string, any> | undefined {
+  try {
+    const [, payload] = token.split('.')
+    if (!payload) return undefined
+    return JSON.parse(decodeBase64Url(payload))
+  } catch {
+    return undefined
+  }
+}
+
+function pickCredential(credentials: Record<string, string>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = credentials[key]
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+  return undefined
+}
+
+function deriveStableNumericId(seed: string, prefix: string): string {
+  const hash = createHash('sha256').update(`${prefix}:${seed}`).digest('hex')
+  const decimal = BigInt(`0x${hash.slice(0, 15)}`).toString()
+  return `${prefix}${decimal}`.slice(0, 19)
+}
+
+function normalizeCookieHeader(rawCookie: string | undefined, authToken: string): string | undefined {
+  const cookie = rawCookie?.trim()
+  if (!cookie && authToken) {
+    return `kimi-auth=${authToken}`
+  }
+  if (!cookie) {
+    return undefined
+  }
+
+  if (/(^|;\s*)kimi-auth=/.test(cookie) || !authToken) {
+    return cookie
+  }
+
+  return `${cookie}; kimi-auth=${authToken}`
+}
+
 function unixTimestamp(): number {
   return Math.floor(Date.now() / 1000)
 }
 
 export function detectTokenType(token: string): 'jwt' | 'refresh' {
   if (token.startsWith('eyJ') && token.split('.').length === 3) {
-    try {
-      const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString())
-      if (payload.app_id === 'kimi' && payload.typ === 'access') {
-        return 'jwt'
-      }
-    } catch (e) {
-      // Parse failed, treat as refresh token
+    const payload = parseJwtPayload(token)
+    if (payload?.app_id === 'kimi' && payload?.typ === 'access') {
+      return 'jwt'
     }
   }
   return 'refresh'
 }
 
 function extractUserIdFromJWT(token: string): string | undefined {
-  try {
-    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString())
-    return payload.sub
-  } catch (e) {
-    return undefined
-  }
+  return parseJwtPayload(token)?.sub
 }
 
 function checkResult(result: AxiosResponse, refreshToken: string): any {
@@ -111,11 +156,71 @@ export class KimiAdapter {
   private provider: Provider
   private account: Account
   private token: string
+  private outboundProxy?: OutboundProxyContext
 
-  constructor(provider: Provider, account: Account) {
+  constructor(provider: Provider, account: Account, outboundProxy?: OutboundProxyContext) {
     this.provider = provider
     this.account = account
-    this.token = account.credentials.token || account.credentials.refreshToken || ''
+    this.outboundProxy = outboundProxy
+    this.token = pickCredential(
+      account.credentials,
+      'token',
+      'accessToken',
+      'access_token',
+      'apiKey',
+      'api_key',
+      'refreshToken',
+      'refresh_token'
+    ) || ''
+  }
+
+  private getJwtValue(accessToken: string, ...keys: string[]): string | undefined {
+    const payload = parseJwtPayload(accessToken)
+    if (!payload) return undefined
+
+    for (const key of keys) {
+      const value = payload[key]
+      if (typeof value === 'string' && value.trim()) {
+        return value.trim()
+      }
+    }
+    return undefined
+  }
+
+  private getDeviceId(accessToken: string): string {
+    return pickCredential(this.account.credentials, 'deviceId', 'device_id', 'xMshDeviceId', 'x_msh_device_id')
+      || this.getJwtValue(accessToken, 'device_id', 'deviceId', 'did')
+      || deriveStableNumericId(accessToken || this.account.id, '7')
+  }
+
+  private getSessionId(accessToken: string): string {
+    return pickCredential(this.account.credentials, 'sessionId', 'session_id', 'ssid', 'xMshSessionId', 'x_msh_session_id')
+      || this.getJwtValue(accessToken, 'ssid', 'session_id', 'sessionId', 'sid')
+      || deriveStableNumericId(accessToken || this.account.id, '1')
+  }
+
+  private getCookieHeader(accessToken: string): string | undefined {
+    return normalizeCookieHeader(
+      pickCredential(this.account.credentials, 'cookies', 'cookie', 'cookieStr', 'cookie_str'),
+      accessToken || this.token
+    )
+  }
+
+  private buildWebHeaders(accessToken: string, contentType: string): Record<string, string> {
+    const cookie = this.getCookieHeader(accessToken)
+    return {
+      ...FAKE_HEADERS,
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': contentType,
+      'Connect-Protocol-Version': '1',
+      'X-Msh-Device-Id': this.getDeviceId(accessToken),
+      'X-Msh-Session-Id': this.getSessionId(accessToken),
+      ...(cookie ? { Cookie: cookie } : {}),
+    }
+  }
+
+  getConversationUrl(chatId: string): string {
+    return `${KIMI_API_BASE}/chat/${encodeURIComponent(chatId)}`
   }
 
   private async acquireToken(): Promise<{ accessToken: string; userId: string }> {
@@ -337,16 +442,12 @@ export class KimiAdapter {
     const response = await axios.post(
       `${KIMI_API_BASE}/apiv2/kimi.gateway.chat.v1.ChatService/Chat`,
       frameBuffer,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/connect+json',
-          ...FAKE_HEADERS,
-        },
+      applyAxiosProxyConfig({
+        headers: this.buildWebHeaders(accessToken, 'application/connect+json'),
         timeout: 120000,
         validateStatus: () => true,
         responseType: 'stream',
-      }
+      }, this.outboundProxy)
     )
 
     console.log('[Kimi] Completion response status:', response.status)
@@ -363,6 +464,84 @@ export class KimiAdapter {
     return { response, conversationId: '' }
   }
 
+  async createShareLink(
+    chatId: string | undefined,
+    messageId?: string,
+    metadata: Pick<KimiChat2ApiInfo, 'citations' | 'search_results'> = {}
+  ): Promise<KimiChat2ApiInfo | undefined> {
+    if (!chatId) {
+      return undefined
+    }
+
+    const baseInfo: KimiChat2ApiInfo = {
+      provider: 'kimi',
+      chat_id: chatId,
+      ...(messageId ? { message_id: messageId, message_ids: [messageId] } : {}),
+      conversation_url: this.getConversationUrl(chatId),
+      ...metadata,
+    }
+
+    try {
+      const { accessToken } = await this.acquireToken()
+      const response = await axios.post(
+        `${KIMI_API_BASE}/apiv2/kimi.gateway.chat.v1.ChatService/CreateChatShare`,
+        {
+          chatId,
+          messageIds: messageId ? [messageId] : [],
+        },
+        applyAxiosProxyConfig({
+          headers: this.buildWebHeaders(accessToken, 'application/json'),
+          timeout: 15000,
+          validateStatus: () => true,
+        }, this.outboundProxy)
+      )
+
+      if (response.status !== 200) {
+        return {
+          ...baseInfo,
+          share_error: response.data?.message || response.data?.msg || `HTTP ${response.status}`,
+        }
+      }
+
+      const data = checkResult(response, this.token)
+      const share = data?.share || data?.chatShare || data
+      const shareId = pickString(
+        share?.id,
+        share?.shareId,
+        share?.share_id,
+        data?.shareId,
+        data?.share_id,
+        data?.id
+      )
+      const shareUrl = pickString(
+        share?.url,
+        share?.shareUrl,
+        share?.share_url,
+        data?.shareUrl,
+        data?.share_url,
+        data?.url
+      )
+
+      if (!shareId) {
+        return {
+          ...baseInfo,
+          share_error: 'Kimi share id was not found',
+        }
+      }
+
+      return {
+        ...baseInfo,
+        share_id: shareId,
+        share_url: shareUrl || `${KIMI_API_BASE}/share/${encodeURIComponent(shareId)}`,
+      }
+    } catch (error) {
+      return {
+        ...baseInfo,
+        share_error: error instanceof Error ? error.message : 'Failed to create Kimi share link',
+      }
+    }
+  }
+
   async deleteConversation(conversationId: string): Promise<boolean> {
     try {
       const { accessToken } = await this.acquireToken()
@@ -370,15 +549,11 @@ export class KimiAdapter {
       const response = await axios.post(
         `${KIMI_API_BASE}/apiv2/kimi.chat.v1.ChatService/DeleteChat`,
         { chat_id: conversationId },
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-            ...FAKE_HEADERS,
-          },
+        applyAxiosProxyConfig({
+          headers: this.buildWebHeaders(accessToken, 'application/json'),
           timeout: 15000,
           validateStatus: () => true,
-        }
+        }, this.outboundProxy)
       )
 
       console.log('[Kimi] Chat deleted:', conversationId, 'Status:', response.status)
@@ -398,15 +573,11 @@ export class KimiAdapter {
         ...(pageToken ? { page_token: pageToken } : {}),
         query: '',
       },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          ...FAKE_HEADERS,
-        },
+      applyAxiosProxyConfig({
+        headers: this.buildWebHeaders(accessToken, 'application/json'),
         timeout: 15000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     const data = checkResult(response, this.token)
@@ -430,15 +601,11 @@ export class KimiAdapter {
     const response = await axios.post(
       `${KIMI_API_BASE}/apiv2/kimi.chat.v1.ChatService/BatchDeleteChats`,
       { chat_ids: chatIds },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          ...FAKE_HEADERS,
-        },
+      applyAxiosProxyConfig({
+        headers: this.buildWebHeaders(accessToken, 'application/json'),
         timeout: 30000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     checkResult(response, this.token)
@@ -491,6 +658,127 @@ export class KimiAdapter {
 
 const STAGE_NAME_THINKING = 'STAGE_NAME_THINKING'
 
+export interface KimiCitation {
+  index: number
+  title: string
+  url: string
+  snippet?: string
+  siteName?: string
+  iconUrl?: string
+}
+
+export interface KimiSearchSummary {
+  keywords: string[]
+  webPages: KimiCitation[]
+}
+
+export interface KimiChat2ApiInfo {
+  provider: 'kimi'
+  chat_id: string
+  message_id?: string
+  message_ids?: string[]
+  conversation_url: string
+  share_id?: string
+  share_url?: string
+  share_error?: string
+  citations?: KimiCitation[]
+  search_results?: KimiSearchSummary
+}
+
+export interface KimiCompletionMetadataContext {
+  chat_id?: string
+  message_id?: string
+  citations: KimiCitation[]
+  search_results?: KimiSearchSummary
+}
+
+function asArray(value: any): any[] {
+  if (Array.isArray(value)) return value
+  return value === undefined || value === null ? [] : [value]
+}
+
+function pickString(...values: any[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+  return undefined
+}
+
+function pickPositiveInteger(...values: any[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return Math.floor(value)
+    }
+    if (typeof value === 'string' && /^\d+$/.test(value) && Number(value) > 0) {
+      return Number(value)
+    }
+  }
+  return undefined
+}
+
+function isKimiCitationReference(reference: any): boolean {
+  return reference?.type === 2
+    || reference?.type === 'CITE'
+    || reference?.type === 'REFERENCE_TYPE_CITE'
+}
+
+function normalizeKimiSearchResult(raw: any, fallbackIndex: number): KimiCitation | null {
+  if (!raw || typeof raw !== 'object') {
+    return null
+  }
+
+  const contentValue = raw.content?.case === 'search'
+    ? raw.content.value
+    : raw.content?.value
+  const source = contentValue || raw.search || raw.value || raw
+  const base = source.base || source.page || source.webPage || source.web_page || source
+  const url = pickString(
+    source.url,
+    source.uri,
+    source.link,
+    source.sourceUrl,
+    source.source_url,
+    base.url,
+    base.uri,
+    base.link,
+    base.sourceUrl,
+    base.source_url
+  )
+
+  if (!url) {
+    return null
+  }
+
+  const index = pickPositiveInteger(
+    source.index,
+    source.cite_index,
+    source.citeIndex,
+    source.ref_index,
+    source.refIndex,
+    base.index,
+    base.cite_index,
+    base.citeIndex,
+    base.ref_index,
+    base.refIndex
+  ) || fallbackIndex
+
+  const title = pickString(source.title, source.name, base.title, base.name, base.siteName, base.site_name) || url
+  const snippet = pickString(source.snippet, source.summary, source.content, base.snippet, base.summary, base.content)
+  const siteName = pickString(source.siteName, source.site_name, base.siteName, base.site_name)
+  const iconUrl = pickString(source.iconUrl, source.icon_url, source.siteIcon, source.site_icon, base.iconUrl, base.icon_url, base.siteIcon, base.site_icon)
+
+  return {
+    index,
+    title,
+    url,
+    ...(snippet ? { snippet } : {}),
+    ...(siteName ? { siteName } : {}),
+    ...(iconUrl ? { iconUrl } : {}),
+  }
+}
+
 export class KimiStreamHandler {
   private model: string
   private conversationId: string
@@ -502,13 +790,26 @@ export class KimiStreamHandler {
   private hasError: boolean = false
   private currentPhase: 'thinking' | 'answer' | undefined = undefined
   private reasoningBuffer: string = ''
+  private searchKeywords: string[] = []
+  private searchResults: KimiCitation[] = []
+  private chat2api?: KimiChat2ApiInfo
+  private metadataProvider?: (context: KimiCompletionMetadataContext) => Promise<KimiChat2ApiInfo | undefined>
+  private isDone: boolean = false
+  private isCompleting: boolean = false
 
-  constructor(model: string, conversationId: string, enableThinking: boolean = false, toolCallingPlan?: ToolCallingPlan) {
+  constructor(
+    model: string,
+    conversationId: string,
+    enableThinking: boolean = false,
+    toolCallingPlan?: ToolCallingPlan,
+    metadataProvider?: (context: KimiCompletionMetadataContext) => Promise<KimiChat2ApiInfo | undefined>
+  ) {
     this.model = model
     this.conversationId = conversationId
     this.enableThinking = enableThinking
     this.toolCallingPlan = toolCallingPlan
     this.toolStreamParser = toolCallingPlan?.shouldParseResponse ? new ToolStreamParser(toolCallingPlan) : undefined
+    this.metadataProvider = metadataProvider
   }
 
   getConversationId(): string | null {
@@ -530,6 +831,15 @@ export class KimiStreamHandler {
 
   hasSessionError(): boolean {
     return this.hasError
+  }
+
+  getSearchMetadata(): Pick<KimiChat2ApiInfo, 'citations' | 'search_results'> {
+    const citations = this.createCitationList()
+    const searchSummary = this.createSearchSummary()
+    return {
+      ...(citations.length > 0 ? { citations } : {}),
+      ...(searchSummary ? { search_results: searchSummary } : {}),
+    }
   }
 
   private detectMultiStage(data: any): 'thinking' | 'answer' | undefined {
@@ -568,6 +878,150 @@ export class KimiStreamHandler {
     return data.block?.text?.content || null
   }
 
+  private addSearchKeywords(keywords: any): void {
+    for (const item of asArray(keywords)) {
+      const keyword = typeof item === 'string'
+        ? item
+        : pickString(item?.keyword, item?.query, item?.text, item?.title, item?.content)
+      if (keyword && !this.searchKeywords.includes(keyword)) {
+        this.searchKeywords = [...this.searchKeywords, keyword]
+      }
+    }
+  }
+
+  private nextAvailableCitationIndex(): number {
+    const usedIndexes = new Set(this.searchResults.map(item => item.index))
+    let index = 1
+    while (usedIndexes.has(index)) {
+      index += 1
+    }
+    return index
+  }
+
+  private addSearchResults(results: any): void {
+    for (const raw of asArray(results)) {
+      const citation = normalizeKimiSearchResult(raw, this.nextAvailableCitationIndex())
+      if (!citation) continue
+
+      const existingIndex = this.searchResults.findIndex(item => item.url === citation.url)
+      if (existingIndex >= 0) {
+        const existing = this.searchResults[existingIndex]
+        this.searchResults = [
+          ...this.searchResults.slice(0, existingIndex),
+          {
+            ...existing,
+            ...citation,
+            index: existing.index || citation.index,
+          },
+          ...this.searchResults.slice(existingIndex + 1),
+        ]
+      } else {
+        this.searchResults = [...this.searchResults, citation]
+      }
+    }
+  }
+
+  private collectSearchBlock(block: any): void {
+    if (!block || typeof block !== 'object') return
+
+    const search = block.content?.case === 'search'
+      ? block.content.value
+      : block.search || block
+
+    this.addSearchKeywords(search?.keywords ?? search?.keyword ?? search?.queries ?? search?.query ?? search?.searchQueries)
+    this.addSearchResults(search?.webPages ?? search?.web_pages ?? search?.pages ?? search?.results)
+
+    for (const step of asArray(search?.steps)) {
+      this.addSearchKeywords(step?.keywords ?? step?.keyword ?? step?.queries ?? step?.query)
+      this.addSearchResults(step?.webPages ?? step?.web_pages ?? step?.pages ?? step?.results)
+    }
+  }
+
+  private collectRefs(refs: any): void {
+    if (!refs || typeof refs !== 'object') return
+
+    this.addSearchResults(refs.usedSearchChunks)
+    this.addSearchResults(refs.used_search_chunks)
+    this.addSearchResults(refs.searchChunks)
+    this.addSearchResults(refs.search_chunks)
+  }
+
+  private collectReferences(references: any): void {
+    for (const reference of asArray(references)) {
+      if (!isKimiCitationReference(reference)) continue
+
+      for (const item of asArray(reference.items ?? reference.item)) {
+        if (item?.content?.case === 'search') {
+          this.addSearchResults(item.content.value)
+        } else {
+          this.addSearchResults(item?.search ?? item?.value)
+        }
+      }
+    }
+  }
+
+  private collectSearchArtifacts(data: any): void {
+    this.collectSearchBlock(data.block)
+
+    if (data.event?.value) {
+      this.collectSearchBlock(data.event.value)
+    }
+
+    if (data.ref) {
+      this.addSearchResults(data.ref.search ?? data.ref)
+    }
+
+    if (data.refs) {
+      this.collectRefs(data.refs)
+    }
+    if (data.references) {
+      this.collectReferences(data.references)
+    }
+
+    if (data.message) {
+      this.collectRefs(data.message.refs)
+      this.collectReferences(data.message.references)
+
+      for (const block of asArray(data.message.blocks)) {
+        this.collectSearchBlock(block)
+      }
+    }
+  }
+
+  private createCitationList(): KimiCitation[] {
+    return [...this.searchResults].sort((a, b) => a.index - b.index)
+  }
+
+  private createSearchSummary(): KimiSearchSummary | undefined {
+    const webPages = this.createCitationList()
+    if (this.searchKeywords.length === 0 && webPages.length === 0) {
+      return undefined
+    }
+
+    return {
+      keywords: [...this.searchKeywords],
+      webPages,
+    }
+  }
+
+  private async attachChat2ApiInfo(): Promise<void> {
+    if (!this.metadataProvider) return
+
+    try {
+      const metadata = await this.metadataProvider({
+        chat_id: this.getConversationId() || undefined,
+        message_id: this.lastMessageId || undefined,
+        citations: this.createCitationList(),
+        search_results: this.createSearchSummary(),
+      })
+      if (metadata) {
+        this.chat2api = metadata
+      }
+    } catch (error) {
+      console.error('[Kimi] Failed to attach chat2api metadata:', error)
+    }
+  }
+
   async handleStream(stream: any): Promise<PassThrough> {
     const transStream = new PassThrough()
     const created = unixTimestamp()
@@ -586,7 +1040,9 @@ export class KimiStreamHandler {
 
     stream.once('close', () => {
       console.log('[Kimi] Stream closed, realChatId:', this.realChatId, 'lastMessageId:', this.lastMessageId)
-      if (!transStream.closed) transStream.end('data: [DONE]\n\n')
+      if (!transStream.closed && !this.isDone && !this.isCompleting) {
+        transStream.end('data: [DONE]\n\n')
+      }
     })
 
     return transStream
@@ -660,6 +1116,7 @@ export class KimiStreamHandler {
     setSentRole: (v: boolean) => void
   ) {
     if (data.heartbeat) return
+    this.collectSearchArtifacts(data)
 
     if (data.chat?.id && !this.realChatId) {
       this.realChatId = data.chat.id
@@ -755,22 +1212,46 @@ export class KimiStreamHandler {
     }
 
     if (data.done !== undefined) {
-      const chatId = this.getConversationId() || this.conversationId
-      const baseChunk = createBaseChunk(chatId, this.model, created)
-      const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-      for (const outChunk of flushChunks) {
-        transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
-      }
-
-      transStream.write(`data: ${JSON.stringify({
-        id: this.getConversationId(),
-        model: this.model,
-        object: 'chat.completion.chunk',
-        choices: [{ index: 0, delta: {}, finish_reason: this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop' }],
-        created,
-      })}\n\n`)
-      transStream.end('data: [DONE]\n\n')
+      void this.finishStream(transStream, created)
     }
+  }
+
+  private async finishStream(transStream: PassThrough, created: number): Promise<void> {
+    if (this.isDone || transStream.closed) return
+    this.isDone = true
+    this.isCompleting = true
+
+    const chatId = this.getConversationId() || this.conversationId
+    const baseChunk = createBaseChunk(chatId, this.model, created)
+    const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
+    for (const outChunk of flushChunks) {
+      transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+    }
+
+    await this.attachChat2ApiInfo()
+
+    const finalChunk: any = {
+      id: this.getConversationId(),
+      model: this.model,
+      object: 'chat.completion.chunk',
+      choices: [{ index: 0, delta: {}, finish_reason: this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop' }],
+      created,
+    }
+    const citations = this.createCitationList()
+    const searchSummary = this.createSearchSummary()
+    if (citations.length > 0) {
+      finalChunk.citations = citations
+    }
+    if (searchSummary) {
+      finalChunk.search_results = searchSummary
+    }
+    if (this.chat2api) {
+      finalChunk.chat2api = this.chat2api
+    }
+
+    transStream.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
+    transStream.end('data: [DONE]\n\n')
+    this.isCompleting = false
   }
 
   private sendChunk(transStream: PassThrough, content: string, created: number) {
@@ -792,6 +1273,47 @@ export class KimiStreamHandler {
         ...baseChunk,
         choices: [{ index: 0, delta: { content }, finish_reason: null }],
       })}\n\n`)
+    }
+  }
+
+  private createNonStreamResponse(content: string, reasoningContent: string, created: number): any {
+    const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
+      ? { content, toolCalls: [] }
+      : parseToolCallsFromText(content, 'kimi')
+
+    const message: any = {
+      role: 'assistant',
+      content: toolCalls.length > 0 ? null : cleanContent.trim(),
+    }
+
+    if (reasoningContent.trim()) {
+      message.reasoning_content = reasoningContent.trim()
+    }
+
+    if (toolCalls.length > 0) {
+      message.tool_calls = toolCalls
+    }
+
+    const citations = this.createCitationList()
+    const searchSummary = this.createSearchSummary()
+    if (citations.length > 0) {
+      message.citations = citations
+    }
+    if (searchSummary) {
+      message.search_results = searchSummary
+    }
+
+    return {
+      id: this.realChatId || this.conversationId,
+      model: this.model,
+      object: 'chat.completion',
+      created,
+      choices: [{
+        index: 0,
+        message,
+        finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
     }
   }
 
@@ -826,6 +1348,8 @@ export class KimiStreamHandler {
                 reject(new Error(`Kimi API Error: ${data.error.message || JSON.stringify(data.error)}`))
                 return
               }
+
+              this.collectSearchArtifacts(data)
 
               if (data.chat?.id && !this.realChatId) {
                 this.realChatId = data.chat.id
@@ -873,35 +1397,7 @@ export class KimiStreamHandler {
               }
 
               if (data.done !== undefined) {
-                const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
-                  ? { content, toolCalls: [] }
-                  : parseToolCallsFromText(content, 'kimi')
-
-                const message: any = {
-                  role: 'assistant',
-                  content: toolCalls.length > 0 ? null : cleanContent.trim(),
-                }
-
-                if (reasoningContent.trim()) {
-                  message.reasoning_content = reasoningContent.trim()
-                }
-
-                if (toolCalls.length > 0) {
-                  message.tool_calls = toolCalls
-                }
-
-                resolve({
-                  id: this.realChatId || this.conversationId,
-                  model: this.model,
-                  object: 'chat.completion',
-                  created,
-                  choices: [{
-                    index: 0,
-                    message,
-                    finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
-                  }],
-                  usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-                })
+                resolve(this.createNonStreamResponse(content, reasoningContent, created))
               }
             }
           } catch (e) {
@@ -916,35 +1412,7 @@ export class KimiStreamHandler {
 
       stream.once('error', reject)
       stream.once('close', () => {
-        const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
-          ? { content, toolCalls: [] }
-          : parseToolCallsFromText(content, 'kimi')
-
-        const message: any = {
-          role: 'assistant',
-          content: toolCalls.length > 0 ? null : cleanContent.trim(),
-        }
-
-        if (reasoningContent.trim()) {
-          message.reasoning_content = reasoningContent.trim()
-        }
-
-        if (toolCalls.length > 0) {
-          message.tool_calls = toolCalls
-        }
-
-        resolve({
-          id: this.conversationId,
-          model: this.model,
-          object: 'chat.completion',
-          created,
-          choices: [{
-            index: 0,
-            message,
-            finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
-          }],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-        })
+        resolve(this.createNonStreamResponse(content, reasoningContent, created))
       })
     })
   }

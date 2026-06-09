@@ -6,9 +6,10 @@ import {
   LoadBalanceConfig,
   ProxyStatus,
   AdvancedConfig,
+  ProxyPool,
 } from '@/components/proxy'
 import { useProxyStore } from '@/stores/proxyStore'
-import { Settings, Scale, Activity, Settings2 } from 'lucide-react'
+import { Settings, Scale, Activity, Settings2, Network } from 'lucide-react'
 
 export function ProxySettings() {
   const { t } = useTranslation()
@@ -45,6 +46,10 @@ export function ProxySettings() {
             <Scale className="h-4 w-4 flex-shrink-0" />
             <span className="hidden md:inline truncate">{t('proxy.loadBalancing')}</span>
           </TabsTrigger>
+          <TabsTrigger value="proxyPool" className="flex items-center gap-2 py-2 px-3 flex-1 min-w-0">
+            <Network className="h-4 w-4 flex-shrink-0" />
+            <span className="hidden md:inline truncate">{t('proxy.proxyPool')}</span>
+          </TabsTrigger>
           <TabsTrigger value="advanced" className="flex items-center gap-2 py-2 px-3 flex-1 min-w-0">
             <Settings2 className="h-4 w-4 flex-shrink-0" />
             <span className="hidden md:inline truncate">{t('proxy.advancedConfig')}</span>
@@ -61,6 +66,10 @@ export function ProxySettings() {
 
         <TabsContent value="loadbalance" className="mt-6">
           <LoadBalanceConfig />
+        </TabsContent>
+
+        <TabsContent value="proxyPool" className="mt-6">
+          <ProxyPool />
         </TabsContent>
 
         <TabsContent value="advanced" className="mt-6">

@@ -133,10 +133,8 @@ export class KimiAdapter extends BaseOAuthAdapter {
       body,
       {
         headers: {
-          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
-          'Connect-Protocol-Version': '1',
-          ...FAKE_HEADERS,
+          ...this.getHeaders(token),
         },
         timeout: 15000,
         validateStatus: () => true,
@@ -189,15 +187,18 @@ export class KimiAdapter extends BaseOAuthAdapter {
     this.emitProgress('pending', `Detected token type: ${tokenType === 'jwt' ? 'JWT Access Token' : 'Unknown Token'}`)
     
     try {
-      const credentials: Record<string, string> = { accessToken: token }
       let accountInfo: Record<string, string> = {}
       
       if (tokenType === 'jwt') {
         const userId = this.extractUserIdFromJWT(token)
         const deviceId = this.extractDeviceIdFromJWT(token)
+        const sessionId = this.extractSessionIdFromJWT(token)
         
         if (deviceId) {
           this.deviceId = deviceId
+        }
+        if (sessionId) {
+          this.sessionId = sessionId
         }
         
         accountInfo = { userId: userId || '' }
@@ -226,7 +227,12 @@ export class KimiAdapter extends BaseOAuthAdapter {
         success: true,
         providerId,
         providerType: 'kimi',
-        credentials,
+        credentials: {
+          token,
+          accessToken: token,
+          deviceId: this.deviceId,
+          sessionId: this.sessionId,
+        },
         accountInfo,
       }
     } catch (error) {

@@ -17,6 +17,7 @@ import { createBaseChunk } from '../utils/streamToolHandler'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
 import type { ToolCallingPlan } from '../toolCalling/types'
+import { applyAxiosProxyConfig, type OutboundProxyContext } from '../proxyTransport'
 
 /**
  * Check if content contains tool calls (both bracket and XML formats)
@@ -63,6 +64,7 @@ interface QwenMessage {
 
 interface ChatCompletionRequest {
   model: string
+  originalModel?: string
   messages: QwenMessage[]
   tools?: any[]
   stream?: boolean
@@ -73,10 +75,263 @@ interface ChatCompletionRequest {
   enableWebSearch?: boolean
 }
 
+interface QwenCitation {
+  index: number
+  title: string
+  url: string
+  snippet?: string
+  siteName?: string
+  iconUrl?: string
+  source?: string
+}
+
+interface QwenSearchSummary {
+  keywords: string[]
+  webPages: QwenCitation[]
+}
+
+interface QwenChat2ApiInfo {
+  provider: 'qwen'
+  session_id?: string
+  req_id?: string
+  response_id?: string
+  share_id?: string
+  share_url?: string
+  share_error?: string
+}
+
 interface QwenSessionListPage {
   sessionIds: string[]
   hasMore: boolean
   nextCursor: string
+}
+
+const SEARCH_RESULT_KEYS = new Set([
+  'citation',
+  'citations',
+  'reference',
+  'references',
+  'searchresult',
+  'searchresults',
+  'webresult',
+  'webresults',
+  'webpage',
+  'webpages',
+  'source',
+  'sources',
+  'sourcelist',
+  'sourceitems',
+  'docs',
+  'documents',
+  'links',
+  'pages',
+  'results',
+])
+
+const SEARCH_KEYWORD_KEYS = new Set([
+  'keyword',
+  'keywords',
+  'querykeyword',
+  'queries',
+  'searchqueries',
+  'searchquery',
+])
+
+const RELATED_SEARCH_KEYS = new Set([
+  'relatedsearch',
+  'relatedsearches',
+  'relatedquestion',
+  'relatedquestions',
+  'suggestion',
+  'suggestions',
+  'suggestedquestion',
+  'suggestedquestions',
+  'recommendquestion',
+  'recommendquestions',
+  'queryrecommend',
+  'queryrecommends',
+  'recommendquery',
+  'recommendqueries',
+])
+
+function asArray(value: any): any[] {
+  if (Array.isArray(value)) return value
+  return value === undefined || value === null ? [] : [value]
+}
+
+function isRecord(value: any): value is Record<string, any> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function normalizeKey(key: string | undefined): string {
+  return (key || '').replace(/[_\-\s]/g, '').toLowerCase()
+}
+
+function pickString(...values: any[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+  return undefined
+}
+
+function pickPositiveInteger(...values: any[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return Math.floor(value)
+    }
+    if (typeof value === 'string' && /^\d+$/.test(value) && Number(value) > 0) {
+      return Number(value)
+    }
+  }
+  return undefined
+}
+
+function normalizeUrl(value: any): string | undefined {
+  const url = pickString(value)
+  if (!url) return undefined
+
+  if (/^https?:\/\//i.test(url)) {
+    return url
+  }
+  if (url.startsWith('//')) {
+    return `https:${url}`
+  }
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(?:\/|$)/i.test(url)) {
+    return `https://${url}`
+  }
+  return undefined
+}
+
+function citationCandidates(raw: Record<string, any>): Record<string, any>[] {
+  return [
+    raw,
+    raw.value,
+    raw.data,
+    raw.result,
+    raw.search,
+    raw.source,
+    raw.page,
+    raw.webPage,
+    raw.web_page,
+    raw.document,
+    raw.doc,
+    raw.base,
+    raw.content?.value,
+    raw.content,
+  ].filter(isRecord)
+}
+
+function pickFromCandidates(candidates: Record<string, any>[], picker: (candidate: Record<string, any>) => any[]): string | undefined {
+  for (const candidate of candidates) {
+    const value = pickString(...picker(candidate))
+    if (value) return value
+  }
+  return undefined
+}
+
+function normalizeQwenCitation(raw: any, fallbackIndex: number): QwenCitation | null {
+  if (typeof raw === 'string') {
+    const url = normalizeUrl(raw)
+    return url ? { index: fallbackIndex, title: url, url } : null
+  }
+
+  if (!isRecord(raw)) {
+    return null
+  }
+
+  const candidates = citationCandidates(raw)
+  let url: string | undefined
+  for (const candidate of candidates) {
+    url = normalizeUrl(
+      pickString(
+        candidate.url,
+        candidate.uri,
+        candidate.link,
+        candidate.href,
+        candidate.sourceUrl,
+        candidate.source_url,
+        candidate.pageUrl,
+        candidate.page_url,
+        candidate.siteUrl,
+        candidate.site_url,
+        candidate.targetUrl,
+        candidate.target_url,
+        candidate.rawUrl,
+        candidate.raw_url,
+        candidate.displayUrl,
+        candidate.display_url
+      )
+    )
+    if (url) break
+  }
+
+  if (!url) {
+    return null
+  }
+
+  const index = pickPositiveInteger(
+    raw.index,
+    raw.cite_index,
+    raw.citeIndex,
+    raw.ref_index,
+    raw.refIndex,
+    raw.number,
+    raw.no
+  ) || fallbackIndex
+
+  const title = pickFromCandidates(candidates, candidate => [
+    candidate.title,
+    candidate.name,
+    candidate.siteName,
+    candidate.site_name,
+    candidate.sourceName,
+    candidate.source_name,
+  ]) || url
+
+  const snippet = pickFromCandidates(candidates, candidate => [
+    candidate.snippet,
+    candidate.summary,
+    candidate.description,
+    candidate.abstract,
+    candidate.text,
+    typeof candidate.content === 'string' ? candidate.content : undefined,
+  ])
+
+  const siteName = pickFromCandidates(candidates, candidate => [
+    candidate.siteName,
+    candidate.site_name,
+    candidate.sourceName,
+    candidate.source_name,
+    candidate.host,
+    candidate.domain,
+  ])
+
+  const iconUrl = pickFromCandidates(candidates, candidate => [
+    candidate.iconUrl,
+    candidate.icon_url,
+    candidate.siteIcon,
+    candidate.site_icon,
+    candidate.favicon,
+  ])
+
+  const source = pickFromCandidates(candidates, candidate => [
+    candidate.source,
+    candidate.sourceType,
+    candidate.source_type,
+    candidate.type,
+  ])
+
+  return {
+    index,
+    title,
+    url,
+    ...(snippet ? { snippet } : {}),
+    ...(siteName ? { siteName } : {}),
+    ...(iconUrl ? { iconUrl } : {}),
+    ...(source ? { source } : {}),
+  }
 }
 
 function uuid(separator: boolean = true): string {
@@ -113,15 +368,17 @@ function extractTextContent(content: string | any[]): string {
 export class QwenAdapter {
   private provider: Provider
   private account: Account
+  private outboundProxy?: OutboundProxyContext
   private axiosInstance = axios.create({
     timeout: 120000,
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
   })
 
-  constructor(provider: Provider, account: Account) {
+  constructor(provider: Provider, account: Account, outboundProxy?: OutboundProxyContext) {
     this.provider = provider
     this.account = account
+    this.outboundProxy = outboundProxy
   }
 
   private getTicket(): string {
@@ -416,7 +673,7 @@ export class QwenAdapter {
 
     console.log('[Qwen] Sending request to /api/v2/chat...')
 
-    const response = await this.axiosInstance.post(url, requestBody, {
+    const response = await this.axiosInstance.post(url, requestBody, applyAxiosProxyConfig({
       headers: {
         ...DEFAULT_HEADERS,
         'Content-Type': 'application/json',
@@ -425,7 +682,7 @@ export class QwenAdapter {
       responseType: 'stream',
       timeout: 120000,
       decompress: false,
-    })
+    }, this.outboundProxy))
 
     console.log('[Qwen] Response status:', response.status)
     console.log('[Qwen] Response headers:', JSON.stringify(response.headers, null, 2))
@@ -513,13 +770,28 @@ export class QwenStreamHandler {
   private sentRole: boolean = false
   private thinkingContent: string = ''
   private sentThinkingRole: boolean = false
+  private reqId: string = ''
+  private searchKeywords: string[] = []
+  private searchResults: QwenCitation[] = []
+  private relatedSearches: string[] = []
+  private shareId: string = ''
+  private shareUrl: string = ''
 
-  constructor(model: string, onEnd?: (sessionId: string) => void, toolCallingPlan?: ToolCallingPlan) {
+  constructor(
+    model: string,
+    onEnd?: (sessionId: string) => void,
+    toolCallingPlan?: ToolCallingPlan,
+    sessionId: string = '',
+    reqId: string = ''
+  ) {
     this.model = model
     this.created = Math.floor(Date.now() / 1000)
     this.onEnd = onEnd
     this.toolCallingPlan = toolCallingPlan
     this.toolStreamParser = toolCallingPlan?.shouldParseResponse ? new ToolStreamParser(toolCallingPlan) : undefined
+    this.sessionId = sessionId
+    this.reqId = reqId
+    this.responseId = reqId
   }
 
   hasSessionError(): boolean {
@@ -579,6 +851,211 @@ export class QwenStreamHandler {
     }
   }
 
+  private nextAvailableCitationIndex(): number {
+    const usedIndexes = new Set(this.searchResults.map(item => item.index))
+    let index = 1
+    while (usedIndexes.has(index)) {
+      index += 1
+    }
+    return index
+  }
+
+  private addSearchKeywords(keywords: any): void {
+    for (const item of asArray(keywords)) {
+      const keyword = typeof item === 'string'
+        ? item.trim()
+        : pickString(item?.keyword, item?.query, item?.text, item?.title, item?.content)
+
+      if (keyword && !this.searchKeywords.includes(keyword)) {
+        this.searchKeywords = [...this.searchKeywords, keyword]
+      }
+    }
+  }
+
+  private addRelatedSearches(related: any): void {
+    for (const item of asArray(related)) {
+      const question = typeof item === 'string'
+        ? item.trim()
+        : pickString(item?.query, item?.question, item?.title, item?.text, item?.content, item?.keyword)
+
+      if (question && !this.relatedSearches.includes(question)) {
+        this.relatedSearches = [...this.relatedSearches, question]
+      }
+    }
+  }
+
+  private addSearchResults(results: any): void {
+    for (const raw of asArray(results)) {
+      if (Array.isArray(raw)) {
+        this.addSearchResults(raw)
+        continue
+      }
+
+      const citation = normalizeQwenCitation(raw, this.nextAvailableCitationIndex())
+      if (citation) {
+        const existingIndex = this.searchResults.findIndex(item => item.url === citation.url)
+        if (existingIndex >= 0) {
+          const existing = this.searchResults[existingIndex]
+          this.searchResults = [
+            ...this.searchResults.slice(0, existingIndex),
+            {
+              ...existing,
+              ...citation,
+              index: existing.index || citation.index,
+            },
+            ...this.searchResults.slice(existingIndex + 1),
+          ]
+        } else {
+          this.searchResults = [...this.searchResults, citation]
+        }
+      }
+
+      if (isRecord(raw)) {
+        this.addSearchKeywords(raw.keywords ?? raw.keyword ?? raw.queries ?? raw.searchQueries ?? raw.search_queries)
+        this.addSearchResults(raw.webPages ?? raw.web_pages ?? raw.pages ?? raw.results ?? raw.items ?? raw.list)
+      }
+    }
+  }
+
+  private collectShareCandidate(value: any): void {
+    if (typeof value === 'string') {
+      const url = normalizeUrl(value)
+      if (url) {
+        this.shareUrl = url
+      }
+      return
+    }
+
+    if (!isRecord(value)) return
+
+    const shareUrl = normalizeUrl(
+      pickString(value.share_url, value.shareUrl, value.url, value.link, value.href)
+    )
+    if (shareUrl) {
+      this.shareUrl = shareUrl
+    }
+
+    const shareId = pickString(value.share_id, value.shareId, value.id)
+    if (shareId) {
+      this.shareId = shareId
+    }
+  }
+
+  private collectSearchArtifacts(value: any, key?: string, depth: number = 0): void {
+    if (value === undefined || value === null || depth > 8) {
+      return
+    }
+
+    const normalizedKey = normalizeKey(key)
+
+    if (SEARCH_KEYWORD_KEYS.has(normalizedKey)) {
+      this.addSearchKeywords(value)
+    }
+    if (RELATED_SEARCH_KEYS.has(normalizedKey)) {
+      this.addRelatedSearches(value)
+    }
+    if (normalizedKey.includes('share')) {
+      this.collectShareCandidate(value)
+    }
+    if (SEARCH_RESULT_KEYS.has(normalizedKey)) {
+      this.addSearchResults(value)
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        this.collectSearchArtifacts(item, key, depth + 1)
+      }
+      return
+    }
+
+    if (!isRecord(value)) {
+      return
+    }
+
+    for (const [childKey, childValue] of Object.entries(value)) {
+      this.collectSearchArtifacts(childValue, childKey, depth + 1)
+    }
+  }
+
+  private createCitationList(): QwenCitation[] {
+    return [...this.searchResults].sort((a, b) => a.index - b.index)
+  }
+
+  private createSearchSummary(): QwenSearchSummary | undefined {
+    const webPages = this.createCitationList()
+    if (this.searchKeywords.length === 0 && webPages.length === 0) {
+      return undefined
+    }
+
+    return {
+      keywords: [...this.searchKeywords],
+      webPages,
+    }
+  }
+
+  private createChat2ApiInfo(): QwenChat2ApiInfo {
+    const reqId = this.responseId || this.reqId
+    const info: QwenChat2ApiInfo = {
+      provider: 'qwen',
+      ...(this.sessionId ? { session_id: this.sessionId } : {}),
+      ...(this.reqId ? { req_id: this.reqId } : {}),
+      ...(reqId && reqId !== this.reqId ? { response_id: reqId } : {}),
+      ...(this.shareId ? { share_id: this.shareId } : {}),
+      ...(this.shareUrl ? { share_url: this.shareUrl } : {}),
+    }
+
+    if (!info.share_url) {
+      info.share_error = 'Qwen share link endpoint is not implemented yet'
+    }
+
+    return info
+  }
+
+  private attachMetadataToResponse(data: any): void {
+    const message = data?.choices?.[0]?.message
+    if (message && typeof message === 'object') {
+      const citations = this.createCitationList()
+      const searchSummary = this.createSearchSummary()
+      if (citations.length > 0) {
+        message.citations = citations
+      }
+      if (searchSummary) {
+        message.search_results = searchSummary
+      }
+      if (this.relatedSearches.length > 0) {
+        message.related_searches = [...this.relatedSearches]
+      }
+    }
+
+    data.chat2api = this.createChat2ApiInfo()
+  }
+
+  private createFinalChunk(finishReason: 'stop' | 'tool_calls'): any {
+    const finalChunk: any = {
+      id: this.responseId || this.sessionId,
+      model: this.model,
+      object: 'chat.completion.chunk',
+      choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      created: this.created,
+      chat2api: this.createChat2ApiInfo(),
+    }
+
+    const citations = this.createCitationList()
+    const searchSummary = this.createSearchSummary()
+    if (citations.length > 0) {
+      finalChunk.citations = citations
+    }
+    if (searchSummary) {
+      finalChunk.search_results = searchSummary
+    }
+    if (this.relatedSearches.length > 0) {
+      finalChunk.related_searches = [...this.relatedSearches]
+    }
+
+    return finalChunk
+  }
+
   handleStream(stream: any, response?: AxiosResponse): PassThrough {
     const transStream = new PassThrough()
 
@@ -624,6 +1101,7 @@ export class QwenStreamHandler {
           try {
             const result = JSON.parse(eventData)
             console.log('[Qwen] Parsed event:', eventType, 'data keys:', Object.keys(result))
+            this.collectSearchArtifacts(result)
             if (result.data?.messages) {
               console.log('[Qwen] Messages count:', result.data.messages.length)
               for (const msg of result.data.messages) {
@@ -632,10 +1110,13 @@ export class QwenStreamHandler {
             }
 
             if (result.communication) {
-              if (!this.sessionId && result.communication.sessionid) {
+              if (result.communication.sessionid) {
                 this.sessionId = result.communication.sessionid
               }
-              if (!this.responseId && result.communication.reqid) {
+              if (result.communication.reqid) {
+                this.reqId = result.communication.reqid
+              }
+              if (result.communication.reqid) {
                 this.responseId = result.communication.reqid
               }
             }
@@ -770,16 +1251,7 @@ export class QwenStreamHandler {
                     // Check if we emitted tool calls
                     const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
                     
-                    transStream.write(
-                      `data: ${JSON.stringify({
-                        id: this.responseId || this.sessionId,
-                        model: this.model,
-                        object: 'chat.completion.chunk',
-                        choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-                        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-                        created: this.created,
-                      })}\n\n`
-                    )
+                    transStream.write(`data: ${JSON.stringify(this.createFinalChunk(finishReason))}\n\n`)
                     safeEnd('data: [DONE]\n\n')
                     this.onEnd?.(this.sessionId)
                   }
@@ -822,16 +1294,7 @@ export class QwenStreamHandler {
             // Check if we emitted tool calls
             const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
             
-            transStream.write(
-              `data: ${JSON.stringify({
-                id: this.responseId || this.sessionId,
-                model: this.model,
-                object: 'chat.completion.chunk',
-                choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-                usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-                created: this.created,
-              })}\n\n`
-            )
+            transStream.write(`data: ${JSON.stringify(this.createFinalChunk(finishReason))}\n\n`)
             safeEnd('data: [DONE]\n\n')
           }
         }
@@ -906,13 +1369,22 @@ export class QwenStreamHandler {
         object: string
         choices: Array<{
           index: number
-          message: { role: string; content: string | null; reasoning_content?: string; tool_calls?: any[] }
+          message: {
+            role: string
+            content: string | null
+            reasoning_content?: string
+            tool_calls?: any[]
+            citations?: QwenCitation[]
+            search_results?: QwenSearchSummary
+            related_searches?: string[]
+          }
           finish_reason: string
         }>
         usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
         created: number
+        chat2api?: QwenChat2ApiInfo
       } = {
-        id: '',
+        id: this.responseId || this.sessionId,
         model: this.model,
         object: 'chat.completion',
         choices: [
@@ -944,6 +1416,13 @@ export class QwenStreamHandler {
         }
       }
 
+      const resolveWithMetadata = () => {
+        if (resolved) return
+        this.attachMetadataToResponse(data)
+        resolved = true
+        resolve(data)
+      }
+
       const processBuffer = () => {
         while (true) {
           const doubleNewlineIndex = buffer.indexOf('\n\n')
@@ -968,11 +1447,18 @@ export class QwenStreamHandler {
             try {
               const result = JSON.parse(eventData)
               console.log('[Qwen] Non-stream parsed event:', eventType, 'data keys:', Object.keys(result))
+              this.collectSearchArtifacts(result)
 
               if (result.communication) {
-                if (!data.id && result.communication.sessionid) {
+                if (result.communication.sessionid) {
                   data.id = result.communication.sessionid
                   this.sessionId = result.communication.sessionid
+                }
+                if (result.communication.reqid) {
+                  this.reqId = result.communication.reqid
+                }
+                if (result.communication.reqid) {
+                  this.responseId = result.communication.reqid
                 }
               }
 
@@ -1057,8 +1543,7 @@ export class QwenStreamHandler {
                       }
                       
                       this.onEnd?.(this.sessionId)
-                      resolved = true
-                      resolve(data)
+                      resolveWithMetadata()
                       return
                     }
                   }
@@ -1077,8 +1562,7 @@ export class QwenStreamHandler {
             if (thinkingAccumulator) {
               data.choices[0].message.reasoning_content = thinkingAccumulator
             }
-            resolved = true
-            resolve(data)
+            resolveWithMetadata()
             return
           }
         }
@@ -1116,7 +1600,7 @@ export class QwenStreamHandler {
               if (thinkingAccumulator) {
                 data.choices[0].message.reasoning_content = thinkingAccumulator
               }
-              resolve(data)
+              resolveWithMetadata()
             })
           } catch (err) {
             console.error('[Qwen] Zstd decompression error:', err)
@@ -1150,7 +1634,7 @@ export class QwenStreamHandler {
           if (thinkingAccumulator) {
             data.choices[0].message.reasoning_content = thinkingAccumulator
           }
-          resolve(data)
+          resolveWithMetadata()
         }
       })
       decompressStream.once('end', () => {
@@ -1163,7 +1647,7 @@ export class QwenStreamHandler {
           if (thinkingAccumulator) {
             data.choices[0].message.reasoning_content = thinkingAccumulator
           }
-          resolve(data)
+          resolveWithMetadata()
         }
       })
     })

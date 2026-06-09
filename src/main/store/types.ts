@@ -80,6 +80,120 @@ export interface BuiltinProviderConfig extends Omit<Provider, 'createdAt' | 'upd
 export type LoadBalanceStrategy = 'round-robin' | 'fill-first' | 'failover'
 
 /**
+ * Account Proxy Mode
+ * - none: do not use outbound proxy
+ * - auto: bind to a healthy SOCKS5 node automatically
+ */
+export type AccountProxyMode = 'none' | 'auto'
+
+/**
+ * Proxy Node Status
+ */
+export type ProxyNodeStatus = 'active' | 'inactive' | 'error' | 'cooldown'
+
+/**
+ * Proxy Binding
+ */
+export interface ProxyBinding {
+  /** Bound proxy node ID */
+  proxyId?: string
+  /** Binding creation time */
+  assignedAt?: number
+  /** Last automatic switch time */
+  lastSwitchAt?: number
+  /** Automatic switch count */
+  switchCount?: number
+}
+
+/**
+ * Proxy node geo information
+ */
+export interface ProxyGeoInfo {
+  province?: string
+  city?: string
+  regionCode?: string
+}
+
+/**
+ * Proxy geo resolve result
+ */
+export interface ProxyGeoResolveResult {
+  id: string
+  success: boolean
+  geo?: ProxyGeoInfo
+  node?: ProxyNode
+  error?: string
+}
+
+/**
+ * Proxy geo batch resolve result
+ */
+export interface ProxyGeoResolveBatchResult {
+  total: number
+  resolved: number
+  skipped: number
+  failed: number
+  results: ProxyGeoResolveResult[]
+}
+
+/**
+ * SOCKS5 Proxy Node
+ */
+export interface ProxyNode {
+  /** Proxy node unique identifier */
+  id: string
+  /** Display name */
+  name: string
+  /** SOCKS5 host */
+  host: string
+  /** SOCKS5 port */
+  port: number
+  /** Optional username */
+  username?: string
+  /** Optional password, encrypted at rest */
+  password?: string
+  /** Province for geo-targeted account assignment */
+  province?: string
+  /** City for geo-targeted account assignment */
+  city?: string
+  /** Administrative region code, e.g. ZH-610100 */
+  regionCode?: string
+  /** Whether the node can be used for new assignments */
+  enabled: boolean
+  /** Health status */
+  status: ProxyNodeStatus
+  /** Last successful check timestamp */
+  lastCheckedAt?: number
+  /** Last failure timestamp */
+  lastFailedAt?: number
+  /** Cooldown end timestamp */
+  cooldownUntil?: number
+  /** Consecutive failure count */
+  failureCount?: number
+  /** Last error message */
+  errorMessage?: string
+  /** Created time */
+  createdAt: number
+  /** Updated time */
+  updatedAt: number
+}
+
+/**
+ * Proxy Pool Configuration
+ */
+export interface ProxyPoolConfig {
+  failThreshold: number
+  cooldownMs: number
+  testTimeoutMs: number
+}
+
+export const DEFAULT_PROXY_POOL_CONFIG: ProxyPoolConfig = {
+  failThreshold: 3,
+  cooldownMs: 5 * 60 * 1000,
+  testTimeoutMs: 15000,
+}
+
+/**
  * Theme Enum
  */
 export type Theme = 'light' | 'dark' | 'system'
@@ -115,6 +229,12 @@ export interface Account {
   dailyLimit?: number
   /** Today used count */
   todayUsed?: number
+  /** Outbound proxy mode */
+  proxyMode?: AccountProxyMode
+  /** Current automatic proxy binding */
+  proxyBinding?: ProxyBinding
+  /** Optional per-account feature configuration */
+  featureConfig?: AccountFeatureConfig
 }
 
 /**
@@ -219,6 +339,10 @@ export interface AppConfig {
   managementApi: ManagementApiConfig
   /** Context management configuration */
   contextManagement: ContextManagementConfig
+  /** DeepSeek post-share background follow-up configuration */
+  deepSeekPostShareFollowUp: DeepSeekPostShareFollowUpConfig
+  /** SOCKS5 proxy pool runtime configuration */
+  proxyPoolConfig: ProxyPoolConfig
 }
 
 /**
@@ -281,6 +405,28 @@ export interface ContextManagementConfig {
   }
   /** Execution order of strategies */
   executionOrder: ('slidingWindow' | 'tokenLimit' | 'summary')[]
+}
+
+/**
+ * DeepSeek Post-Share Follow-Up Configuration Interface
+ * Controls optional background follow-up turns after a share link is created.
+ */
+export interface DeepSeekPostShareFollowUpConfig {
+  /** Whether background follow-up turns are enabled */
+  enabled: boolean
+  /** Fixed user prompts sent after the main answer is shared */
+  prompts: string[]
+  /** Delay before the first background follow-up */
+  delayMs: number
+}
+
+/**
+ * Optional per-account feature configuration.
+ * Missing nested fields mean the account inherits provider-level defaults.
+ */
+export interface AccountFeatureConfig {
+  /** DeepSeek account-level post-share follow-up override */
+  deepSeekPostShareFollowUp?: DeepSeekPostShareFollowUpConfig
 }
 
 /**
@@ -435,6 +581,10 @@ export interface RequestLogEntry {
   accountId?: string
   /** Account name */
   accountName?: string
+  /** Outbound proxy node ID */
+  proxyId?: string
+  /** Outbound proxy node name */
+  proxyName?: string
 
   /** Request body JSON string */
   requestBody?: string
@@ -634,6 +784,8 @@ export interface StoreSchema {
   providers: Provider[]
   /** Account list */
   accounts: Account[]
+  /** SOCKS5 proxy node list */
+  proxyNodes: ProxyNode[]
   /** Application configuration */
   config: AppConfig
   /** Log entries */
@@ -709,6 +861,12 @@ export const DEFAULT_REQUEST_LOG_CONFIG: RequestLogConfig = {
   includeBodies: false,
   maxBodyChars: 8000,
   redactSensitiveData: true,
+}
+
+export const DEFAULT_DEEPSEEK_POST_SHARE_FOLLOW_UP_CONFIG: DeepSeekPostShareFollowUpConfig = {
+  enabled: false,
+  prompts: ['能不能再具体展开一下？', '有没有实际案例或注意事项？'],
+  delayMs: 1500,
 }
 
 export const DEFAULT_DEEPSEEK_MODEL_MAPPINGS: Record<string, ModelMapping> = {
@@ -815,6 +973,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   toolPromptConfig: undefined,
   managementApi: DEFAULT_MANAGEMENT_API_CONFIG,
   contextManagement: DEFAULT_CONTEXT_MANAGEMENT_CONFIG,
+  deepSeekPostShareFollowUp: DEFAULT_DEEPSEEK_POST_SHARE_FOLLOW_UP_CONFIG,
+  proxyPoolConfig: DEFAULT_PROXY_POOL_CONFIG,
 }
 
 /**

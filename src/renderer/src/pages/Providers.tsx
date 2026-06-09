@@ -23,6 +23,7 @@ import type {
   BuiltinProviderConfig,
   CustomProviderFormData,
   Account,
+  AppConfig,
 } from '@/types/electron'
 import { FilterType, StatusFilter } from '@/components/providers/ProviderFilter'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -48,6 +49,7 @@ export function Providers() {
   
   const [showAddAccountDialog, setShowAddAccountDialog] = useState(false)
   const [editingAccount, setEditingAccount] = useState<Account | null>(null)
+  const [appConfig, setAppConfig] = useState<AppConfig | null>(null)
   
   const [showModelEditor, setShowModelEditor] = useState(false)
   const [modelEditorProvider, setModelEditorProvider] = useState<{ id: string; name: string } | null>(null)
@@ -68,15 +70,17 @@ export function Providers() {
       
       try {
         useProvidersStore.getState().setIsLoading(true)
-        const [providersData, builtinData, accountsData] = await Promise.all([
+        const [providersData, builtinData, accountsData, configData] = await Promise.all([
           window.electronAPI.providers.getAll(),
           window.electronAPI.providers.getBuiltin(),
           window.electronAPI.accounts.getAll(),
+          window.electronAPI.config.get(),
         ])
         
         useProvidersStore.getState().setProviders(providersData)
         useProvidersStore.getState().setBuiltinProviders(builtinData)
         useProvidersStore.getState().setAccounts(accountsData)
+        setAppConfig(configData)
         
         const existingStatuses = useProvidersStore.getState().providerStatuses
         const statusMap: Record<string, ProviderStatus> = { ...existingStatuses }
@@ -105,6 +109,11 @@ export function Providers() {
     }
     
     loadInitialData()
+  }, [])
+
+  useEffect(() => {
+    if (!window.electronAPI?.config?.onConfigChanged) return
+    return window.electronAPI.config.onConfigChanged(setAppConfig)
   }, [])
 
   const filteredProviders = store.providers.filter((provider) => {
@@ -380,17 +389,31 @@ export function Providers() {
     email?: string
     credentials: Record<string, string>
     dailyLimit?: number
+    proxyMode?: Account['proxyMode']
   }) => {
     if (!store.selectedProviderId) return
     
     try {
-      const account = await window.electronAPI.accounts.add({
+      let account = await window.electronAPI.accounts.add({
         providerId: store.selectedProviderId,
         name: data.name,
         email: data.email,
         credentials: data.credentials,
         dailyLimit: data.dailyLimit,
+        proxyMode: data.proxyMode,
       })
+      if (data.proxyMode === 'auto') {
+        try {
+          const assignment = await window.electronAPI.proxyPool.assignAccount(account.id)
+          account = assignment.account
+        } catch (error) {
+          toast({
+            title: t('proxyPool.assignFailed'),
+            description: error instanceof Error ? error.message : t('proxyPool.noAvailable'),
+            variant: 'destructive',
+          })
+        }
+      }
       store.addAccount(account)
       
       const providerAccounts = store.getAccountsByProvider(store.selectedProviderId)
@@ -419,9 +442,28 @@ export function Providers() {
       const account = store.getAccountById(id)
       if (!account) return
       
-      const updated = await window.electronAPI.accounts.update(id, updates)
+      let updated = await window.electronAPI.accounts.update(id, updates)
       if (updated) {
-        store.updateAccount(id, updates)
+        if (updates.proxyMode === 'auto') {
+          try {
+            const assignment = await window.electronAPI.proxyPool.assignAccount(id)
+            updated = assignment.account
+          } catch (error) {
+            toast({
+              title: t('proxyPool.assignFailed'),
+              description: error instanceof Error ? error.message : t('proxyPool.noAvailable'),
+              variant: 'destructive',
+            })
+          }
+        } else if (updates.proxyMode === 'none') {
+          try {
+            updated = await window.electronAPI.proxyPool.releaseAccount(id)
+          } catch (error) {
+            console.error('Failed to release proxy binding:', error)
+          }
+        }
+
+        store.updateAccount(id, updated)
         
         if (store.selectedProviderId) {
           const providerAccounts = store.getAccountsByProvider(store.selectedProviderId)
@@ -436,6 +478,8 @@ export function Providers() {
           title: t('providers.updateSuccess'),
           description: t('providers.accountUpdated'),
         })
+      } else {
+        throw new Error(t('providers.operationFailed'))
       }
     } catch (error) {
       toast({
@@ -443,7 +487,12 @@ export function Providers() {
         description: error instanceof Error ? error.message : t('providers.operationFailed'),
         variant: 'destructive',
       })
+      throw error
     }
+  }
+
+  const handleAccountUpdatedFromChild = (id: string, updates: Partial<Account>) => {
+    store.updateAccount(id, updates)
   }
 
   const handleDeleteAccount = async (id: string) => {
@@ -597,6 +646,8 @@ export function Providers() {
           }}
           onDelete={() => handleDeleteAccount(selectedAccount.id)}
           onValidate={() => handleValidateAccount(selectedAccount.id)}
+          onUpdate={(updates) => handleUpdateAccount(selectedAccount.id, updates)}
+          deepSeekDefaultFollowUpConfig={appConfig?.deepSeekPostShareFollowUp}
         />
       </div>
     )
@@ -636,6 +687,8 @@ export function Providers() {
           onDeleteAccount={handleDeleteAccount}
           onValidateAccount={handleValidateAccount}
           onViewDetail={handleViewAccountDetail}
+          deepSeekDefaultFollowUpConfig={appConfig?.deepSeekPostShareFollowUp}
+          onAccountUpdated={handleAccountUpdatedFromChild}
         />
 
         <AddAccountDialog

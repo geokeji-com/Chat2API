@@ -9,6 +9,7 @@ import { PassThrough } from 'stream'
 import { createParser } from 'eventsource-parser'
 import { Account, Provider } from '../../store/types'
 import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse'
+import { applyAxiosProxyConfig, type OutboundProxyContext } from '../proxyTransport'
 
 const QWEN_AI_BASE = 'https://chat.qwen.ai'
 
@@ -74,15 +75,17 @@ function timestamp(): number {
 export class QwenAiAdapter {
   private provider: Provider
   private account: Account
+  private outboundProxy?: OutboundProxyContext
   private axiosInstance = axios.create({
     timeout: 120000,
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
   })
 
-  constructor(provider: Provider, account: Account) {
+  constructor(provider: Provider, account: Account, outboundProxy?: OutboundProxyContext) {
     this.provider = provider
     this.account = account
+    this.outboundProxy = outboundProxy
   }
 
   private getToken(): string {
@@ -342,14 +345,14 @@ export class QwenAiAdapter {
     console.log('[QwenAI] Request payload:', JSON.stringify(payload, null, 2))
     console.log('[QwenAI] Request headers:', JSON.stringify(this.getHeaders(chatId), null, 2))
 
-    const response = await this.axiosInstance.post(url, payload, {
+    const response = await this.axiosInstance.post(url, payload, applyAxiosProxyConfig({
       headers: {
         ...this.getHeaders(chatId),
         'x-accel-buffering': 'no',
       },
       responseType: 'stream',
       timeout: 120000,
-    })
+    }, this.outboundProxy))
 
     console.log('[QwenAI] Response status:', response.status)
     console.log('[QwenAI] Response headers:', JSON.stringify(response.headers, null, 2))

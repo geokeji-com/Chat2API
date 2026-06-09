@@ -6,11 +6,12 @@
 import axios, { AxiosRequestConfig, AxiosResponse, AxiosError } from 'axios'
 import http2 from 'http2'
 import { PassThrough } from 'stream'
-import { Account, Provider } from '../store/types'
+import type { Account, Provider, ProxyNode } from '../store/types'
 import { ForwardResult, ChatCompletionRequest, ProxyContext } from './types'
 import { proxyStatusManager } from './status'
 import { storeManager } from '../store/store'
 import { DeepSeekAdapter } from './adapters/deepseek'
+import type { DeepSeekMessageId, DeepSeekShareInfo } from './adapters/deepseek'
 import { DeepSeekStreamHandler } from './adapters/deepseek-stream'
 import { GLMAdapter, GLMStreamHandler } from './adapters/glm'
 import { KimiAdapter, KimiStreamHandler } from './adapters/kimi'
@@ -29,6 +30,18 @@ import {
   SummaryGenerator,
   type ChatMessage as ContextChatMessage,
 } from './services/contextManagementService'
+import {
+  createDeepSeekPostShareFollowUpPlan,
+  executeDeepSeekPostShareFollowUps,
+  resolveDeepSeekPostShareFollowUpConfig,
+} from './services/deepseekPostShareFollowUp'
+import {
+  applyAxiosProxyConfig,
+  createProxyContext,
+  isLikelyProxyTransportError,
+  type OutboundProxyContext,
+} from './proxyTransport'
+import { proxyPoolManager } from './proxyPool'
 
 function shouldDeleteSession(): boolean {
   return sessionManager.shouldDeleteAfterChat()
@@ -42,7 +55,8 @@ type ProviderForwarder = {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    outboundProxy?: OutboundProxyContext
   ) => Promise<ForwardResult>
 }
 
@@ -60,56 +74,56 @@ export class RequestForwarder {
     {
       name: 'deepseek',
       matches: DeepSeekAdapter.isDeepSeekProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardDeepSeek(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, outboundProxy) =>
+        this.forwardDeepSeek(request, account, provider, actualModel, startTime, outboundProxy),
     },
     {
       name: 'glm',
       matches: GLMAdapter.isGLMProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardGLM(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, outboundProxy) =>
+        this.forwardGLM(request, account, provider, actualModel, startTime, outboundProxy),
     },
     {
       name: 'kimi',
       matches: KimiAdapter.isKimiProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardKimi(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, outboundProxy) =>
+        this.forwardKimi(request, account, provider, actualModel, startTime, outboundProxy),
     },
     {
       name: 'qwen',
       matches: QwenAdapter.isQwenProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardQwen(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, outboundProxy) =>
+        this.forwardQwen(request, account, provider, actualModel, startTime, outboundProxy),
     },
     {
       name: 'qwen-ai',
       matches: QwenAiAdapter.isQwenAiProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardQwenAi(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, outboundProxy) =>
+        this.forwardQwenAi(request, account, provider, actualModel, startTime, outboundProxy),
     },
     {
       name: 'zai',
       matches: ZaiAdapter.isZaiProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardZai(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, outboundProxy) =>
+        this.forwardZai(request, account, provider, actualModel, startTime, outboundProxy),
     },
     {
       name: 'minimax',
       matches: MiniMaxAdapter.isMiniMaxProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardMiniMax(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, outboundProxy) =>
+        this.forwardMiniMax(request, account, provider, actualModel, startTime, outboundProxy),
     },
     {
       name: 'mimo',
       matches: MimoAdapter.isMimoProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardMimo(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, outboundProxy) =>
+        this.forwardMimo(request, account, provider, actualModel, startTime, outboundProxy),
     },
     {
       name: 'perplexity',
       matches: PerplexityAdapter.isPerplexityProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardPerplexity(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, outboundProxy) =>
+        this.forwardPerplexity(request, account, provider, actualModel, startTime, outboundProxy),
     },
   ]
 
@@ -145,6 +159,94 @@ export class RequestForwarder {
   private applyToolCallsToResponse(result: any, transformed: ToolCallingTransformResult): void {
     const engine = new ToolCallingEngine(storeManager.getConfig().toolCallingConfig)
     engine.applyNonStreamResponse(result, transformed.plan)
+  }
+
+  private createDeepSeekDeleteSessionCallback(adapter: DeepSeekAdapter, sessionId: string): (() => Promise<void>) | undefined {
+    if (!shouldDeleteSession()) {
+      return undefined
+    }
+
+    return async () => {
+      try {
+        await adapter.deleteSession(sessionId)
+      } catch (error) {
+        console.error('[DeepSeek] Failed to delete session:', error)
+      }
+    }
+  }
+
+  private handleDeepSeekPostShareCompletion(options: {
+    adapter: DeepSeekAdapter
+    account: Account
+    sessionId: string
+    actualModel: string
+    shareInfo: DeepSeekShareInfo | undefined
+    finishReason: string | undefined
+    deleteSessionCallback?: () => Promise<void>
+  }): void {
+    const config = resolveDeepSeekPostShareFollowUpConfig({
+      defaultConfig: storeManager.getConfig().deepSeekPostShareFollowUp,
+      account: options.account,
+    })
+    const plan = createDeepSeekPostShareFollowUpPlan({
+      config,
+      shareInfo: options.shareInfo,
+      finishReason: options.finishReason,
+    })
+
+    if (!plan) {
+      void options.deleteSessionCallback?.()
+      return
+    }
+
+    const runFollowUps = async () => {
+      try {
+        console.log('[DeepSeek] Running post-share follow-ups:', {
+          sessionId: options.sessionId,
+          prompts: plan.prompts.length,
+          delayMs: plan.delayMs,
+        })
+
+        await executeDeepSeekPostShareFollowUps({
+          sessionId: options.sessionId,
+          model: options.actualModel,
+          initialParentMessageId: plan.initialParentMessageId,
+          prompts: plan.prompts,
+          delayMs: plan.delayMs,
+          sendFollowUp: async (
+            sessionId: string,
+            parentMessageId: DeepSeekMessageId,
+            prompt: string,
+            model: string,
+          ) => {
+            const response = await options.adapter.sendFollowUp(sessionId, parentMessageId, prompt, model)
+            if (response.status >= 400) {
+              throw new Error(`Follow-up failed: HTTP ${response.status}`)
+            }
+
+            const handler = new DeepSeekStreamHandler(
+              model,
+              sessionId,
+              undefined,
+              false,
+              undefined,
+              undefined,
+              model,
+            )
+            await handler.handleNonStream(response.data)
+            return handler.getLastMessageId()
+          },
+        })
+      } catch (error) {
+        console.error('[DeepSeek] Post-share follow-ups failed:', error)
+      } finally {
+        await options.deleteSessionCallback?.()
+      }
+    }
+
+    setTimeout(() => {
+      void runFollowUps()
+    }, 0)
   }
 
   /**
@@ -232,6 +334,22 @@ export class RequestForwarder {
     const maxRetries = config.retryCount
 
     let lastError: string | undefined
+    let lastFailureType: ForwardResult['failureType'] | undefined
+    let currentAccount = account
+    let currentProxyNode: ProxyNode | undefined
+
+    const proxyAssignment = await proxyPoolManager.ensureAccountProxy(account, provider)
+    if (proxyAssignment.error) {
+      return {
+        success: false,
+        status: 503,
+        error: proxyAssignment.error,
+        latency: Date.now() - startTime,
+        failureType: 'proxy',
+      }
+    }
+    currentAccount = proxyAssignment.account
+    currentProxyNode = proxyAssignment.proxyNode
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (attempt > 0) {
@@ -239,14 +357,20 @@ export class RequestForwarder {
       }
 
       let modifiedRequest = request
+      const proxyContext = {
+        ...context,
+        accountId: currentAccount.id,
+        proxyId: currentProxyNode?.id,
+        proxyName: currentProxyNode?.name,
+      }
 
       if (config.contextManagement?.enabled && modifiedRequest.messages && modifiedRequest.messages.length > 0) {
         try {
           const summaryGenerator = this.createSummaryGenerator(
-            account,
+            currentAccount,
             provider,
             actualModel,
-            context
+            proxyContext
           )
 
           const contextService = createContextManagementService(
@@ -290,19 +414,49 @@ export class RequestForwarder {
       }
 
       try {
-        const result = await this.doForward(modifiedRequest, account, provider, actualModel, context)
+        const result = await this.doForward(modifiedRequest, currentAccount, provider, actualModel, proxyContext)
 
         if (result.success) {
+          if (currentProxyNode) {
+            proxyPoolManager.markNodeSuccess(currentProxyNode.id)
+          }
           return result
         }
 
         lastError = result.error
+        lastFailureType = result.failureType
+
+        if (result.failureType === 'proxy' && currentProxyNode) {
+          const switchResult = proxyPoolManager.handleProxyFailure(
+            currentAccount,
+            provider,
+            currentProxyNode,
+            result.error || 'Proxy transport failed',
+          )
+          currentAccount = switchResult.account
+          currentProxyNode = switchResult.proxyNode
+          if (switchResult.switched) {
+            lastError = switchResult.error
+            continue
+          }
+          break
+        }
 
         if (result.status && result.status < 500 && result.status !== 429) {
           break
         }
       } catch (error) {
         lastError = error instanceof Error ? error.message : 'Unknown error'
+        lastFailureType = currentProxyNode && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown'
+        if (currentProxyNode && isLikelyProxyTransportError(error)) {
+          const switchResult = proxyPoolManager.handleProxyFailure(currentAccount, provider, currentProxyNode, error)
+          currentAccount = switchResult.account
+          currentProxyNode = switchResult.proxyNode
+          if (switchResult.switched) {
+            continue
+          }
+          break
+        }
       }
     }
 
@@ -310,6 +464,9 @@ export class RequestForwarder {
       success: false,
       error: lastError || 'Request failed after retries',
       latency: Date.now() - startTime,
+      failureType: lastFailureType,
+      proxyId: currentProxyNode?.id,
+      proxyName: currentProxyNode?.name,
     }
   }
 
@@ -324,10 +481,20 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     const startTime = Date.now()
+    const outboundProxy = createProxyContext(
+      context.proxyId ? storeManager.getProxyNodeById(context.proxyId, true) : undefined
+    )
 
     const dedicatedForwarder = this.providerForwarders.find(forwarder => forwarder.matches(provider))
     if (dedicatedForwarder) {
-      return dedicatedForwarder.forward(request, account, provider, actualModel, startTime)
+      const result = await dedicatedForwarder.forward(request, account, provider, actualModel, startTime, outboundProxy)
+      return outboundProxy
+        ? {
+            ...result,
+            proxyId: outboundProxy.node.id,
+            proxyName: outboundProxy.node.name,
+          }
+        : result
     }
 
     try {
@@ -336,7 +503,7 @@ export class RequestForwarder {
       const headers = this.buildHeaders(provider, account)
       const body = this.buildRequestBody(request, actualModel, account)
 
-      const axiosConfig: AxiosRequestConfig = {
+      const axiosConfig: AxiosRequestConfig = applyAxiosProxyConfig({
         method: 'POST',
         url,
         headers,
@@ -344,7 +511,7 @@ export class RequestForwarder {
         timeout: proxyStatusManager.getConfig().timeout,
         responseType: request.stream ? 'stream' : 'json',
         validateStatus: () => true,
-      }
+      }, outboundProxy)
 
       const response: AxiosResponse = await this.axiosInstance.request(axiosConfig)
       const latency = Date.now() - startTime
@@ -355,17 +522,20 @@ export class RequestForwarder {
           status: response.status,
           error: this.extractErrorMessage(response),
           latency,
+          failureType: 'provider',
         }
       }
 
       if (request.stream) {
         return {
-          success: true,
-          status: response.status,
-          headers: this.extractHeaders(response.headers),
-          stream: response.data,
-          latency,
-        }
+        success: true,
+        status: response.status,
+        headers: this.extractHeaders(response.headers),
+        stream: response.data,
+        latency,
+        proxyId: outboundProxy?.node.id,
+        proxyName: outboundProxy?.node.name,
+      }
       }
 
       return {
@@ -374,6 +544,8 @@ export class RequestForwarder {
         headers: this.extractHeaders(response.headers),
         body: response.data,
         latency,
+        proxyId: outboundProxy?.node.id,
+        proxyName: outboundProxy?.node.name,
       }
     } catch (error) {
       const latency = Date.now() - startTime
@@ -384,6 +556,7 @@ export class RequestForwarder {
           status: error.response?.status,
           error: error.message,
           latency,
+          failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'network',
         }
       }
 
@@ -391,6 +564,7 @@ export class RequestForwarder {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
         latency,
+        failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown',
       }
     }
   }
@@ -403,7 +577,8 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    outboundProxy?: OutboundProxyContext
   ): Promise<ForwardResult> {
     try {
       const transformed = this.transformRequestForPromptToolUse(request, provider)
@@ -413,7 +588,7 @@ export class RequestForwarder {
         tools: transformed.tools,
       }
 
-      const adapter = new DeepSeekAdapter(provider, account)
+      const adapter = new DeepSeekAdapter(provider, account, outboundProxy)
       
       const { response, sessionId } = await adapter.chatCompletion({
         model: request.model,
@@ -445,22 +620,21 @@ export class RequestForwarder {
         }
       }
 
-      // Prepare callback for deleting session
-      const deleteSessionCallback = shouldDeleteSession()
-        ? async () => {
-            try {
-              await adapter.deleteSession(sessionId)
-            } catch (error) {
-              console.error('[DeepSeek] Failed to delete session:', error)
-            }
-          }
-        : undefined
+      const deleteSessionCallback = this.createDeepSeekDeleteSessionCallback(adapter, sessionId)
 
       // DeepSeek always returns streaming response
       const handler = new DeepSeekStreamHandler(
         actualModel,
         sessionId,
-        deleteSessionCallback,
+        (shareInfo, finishReason) => this.handleDeepSeekPostShareCompletion({
+          adapter,
+          account,
+          sessionId,
+          actualModel,
+          shareInfo,
+          finishReason,
+          deleteSessionCallback,
+        }),
         transformedRequest.web_search,
         transformedRequest.reasoning_effort,
         transformed.plan,
@@ -486,10 +660,16 @@ export class RequestForwarder {
       const result = await handler.handleNonStream(response.data)
       
       this.applyToolCallsToResponse(result, transformed)
-      
-      if (deleteSessionCallback) {
-        await deleteSessionCallback()
-      }
+
+      this.handleDeepSeekPostShareCompletion({
+        adapter,
+        account,
+        sessionId,
+        actualModel,
+        shareInfo: result.chat2api,
+        finishReason: result.choices?.[0]?.finish_reason,
+        deleteSessionCallback,
+      })
 
       return {
         success: true,
@@ -505,6 +685,7 @@ export class RequestForwarder {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
         latency,
+        failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown',
       }
     }
   }
@@ -517,7 +698,8 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    outboundProxy?: OutboundProxyContext
   ): Promise<ForwardResult> {
     try {
       const transformed = this.transformRequestForPromptToolUse(request, provider)
@@ -527,7 +709,7 @@ export class RequestForwarder {
         tools: transformed.tools,
       }
 
-      const adapter = new GLMAdapter(provider, account)
+      const adapter = new GLMAdapter(provider, account, outboundProxy)
       const { response, conversationId } = await adapter.chatCompletion({
         model: actualModel,
         originalModel: request.model,
@@ -617,6 +799,7 @@ export class RequestForwarder {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
         latency,
+        failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown',
       }
     }
   }
@@ -626,12 +809,13 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    outboundProxy?: OutboundProxyContext
   ): Promise<ForwardResult> {
     try {
       const transformed = this.transformRequestForPromptToolUse(request, provider)
       
-      const adapter = new KimiAdapter(provider, account)
+      const adapter = new KimiAdapter(provider, account, outboundProxy)
       const { response, conversationId } = await adapter.chatCompletion({
         model: actualModel,
         originalModel: request.model,
@@ -654,7 +838,20 @@ export class RequestForwarder {
         }
       }
 
-      const handler = new KimiStreamHandler(actualModel, conversationId, !!request.reasoning_effort, transformed.plan)
+      const handler = new KimiStreamHandler(
+        actualModel,
+        conversationId,
+        !!request.reasoning_effort,
+        transformed.plan,
+        (context) => adapter.createShareLink(
+          context.chat_id,
+          context.message_id,
+          {
+            ...(context.citations.length > 0 ? { citations: context.citations } : {}),
+            ...(context.search_results ? { search_results: context.search_results } : {}),
+          }
+        )
+      )
       
       if (request.stream) {
         const transformedStream = await handler.handleStream(response.data)
@@ -688,8 +885,19 @@ export class RequestForwarder {
 
       this.applyToolCallsToResponse(result, transformed)
 
+      const realChatId = handler.getConversationId()
+      if (realChatId) {
+        const shareInfo = await adapter.createShareLink(
+          realChatId,
+          handler.getLastMessageId() ?? undefined,
+          handler.getSearchMetadata()
+        )
+        if (shareInfo) {
+          result.chat2api = shareInfo
+        }
+      }
+
       if (shouldDeleteSession()) {
-        const realChatId = handler.getConversationId()
         if (realChatId) {
           await adapter.deleteConversation(realChatId)
         }
@@ -709,6 +917,7 @@ export class RequestForwarder {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
         latency,
+        failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown',
       }
     }
   }
@@ -721,7 +930,8 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    outboundProxy?: OutboundProxyContext
   ): Promise<ForwardResult> {
     try {
       const transformed = this.transformRequestForPromptToolUse(request, provider)
@@ -731,7 +941,7 @@ export class RequestForwarder {
         tools: transformed.tools,
       }
 
-      const adapter = new QwenAdapter(provider, account)
+      const adapter = new QwenAdapter(provider, account, outboundProxy)
       const { response, sessionId, reqId } = await adapter.chatCompletion({
         model: actualModel,
         originalModel: request.model,
@@ -764,7 +974,7 @@ export class RequestForwarder {
           }
         : undefined
 
-      const handler = new QwenStreamHandler(actualModel, deleteSessionCallback, transformed.plan)
+      const handler = new QwenStreamHandler(actualModel, deleteSessionCallback, transformed.plan, sessionId, reqId)
 
       if (request.stream) {
         const transformedStream = await handler.handleStream(response.data, response)
@@ -803,6 +1013,7 @@ export class RequestForwarder {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
         latency,
+        failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown',
       }
     }
   }
@@ -815,12 +1026,13 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    outboundProxy?: OutboundProxyContext
   ): Promise<ForwardResult> {
     try {
       const transformed = this.transformRequestForPromptToolUse(request, provider)
       
-      const adapter = new QwenAiAdapter(provider, account)
+      const adapter = new QwenAiAdapter(provider, account, outboundProxy)
       const { response, chatId, parentId } = await adapter.chatCompletion({
         model: actualModel,
         originalModel: request.model,
@@ -891,6 +1103,7 @@ export class RequestForwarder {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
         latency,
+        failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown',
       }
     }
   }
@@ -903,14 +1116,15 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    outboundProxy?: OutboundProxyContext
   ): Promise<ForwardResult> {
     console.log('[forwardZai] actualModel:', actualModel)
     console.log('[forwardZai] provider.modelMappings:', provider.modelMappings)
     try {
       const transformed = this.transformRequestForPromptToolUse(request, provider)
       
-      const adapter = new ZaiAdapter(provider, account)
+      const adapter = new ZaiAdapter(provider, account, outboundProxy)
       const { response, chatId, requestId } = await adapter.chatCompletion({
         model: actualModel,
         originalModel: request.model,
@@ -982,6 +1196,7 @@ export class RequestForwarder {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
         latency,
+        failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown',
       }
     }
   }
@@ -994,14 +1209,15 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    outboundProxy?: OutboundProxyContext
   ): Promise<ForwardResult> {
     console.log('[forwardMiniMax] actualModel:', actualModel)
     console.log('[forwardMiniMax] provider.modelMappings:', provider.modelMappings)
     try {
       const transformed = this.transformRequestForPromptToolUse(request, provider)
       
-      const adapter = new MiniMaxAdapter(provider, account)
+      const adapter = new MiniMaxAdapter(provider, account, outboundProxy)
       const { response, stream, chatId } = await adapter.chatCompletion({
         model: actualModel,
         originalModel: request.model,
@@ -1085,6 +1301,7 @@ export class RequestForwarder {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
         latency,
+        failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown',
       }
     }
   }
@@ -1098,7 +1315,8 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    outboundProxy?: OutboundProxyContext
   ): Promise<ForwardResult> {
     try {
       const transformed = this.transformRequestForPromptToolUse(request, provider)
@@ -1107,7 +1325,7 @@ export class RequestForwarder {
         messages: transformed.messages,
         tools: transformed.tools,
       }
-      const adapter = new MimoAdapter(provider, account)
+      const adapter = new MimoAdapter(provider, account, outboundProxy)
 
       const { response, conversationId, query } = await adapter.chatCompletion({
         model: actualModel,
@@ -1204,6 +1422,7 @@ export class RequestForwarder {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
         latency,
+        failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown',
       }
     }
   }
@@ -1217,13 +1436,14 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    outboundProxy?: OutboundProxyContext
   ): Promise<ForwardResult> {
     console.log('[forwardPerplexity] actualModel:', actualModel)
     try {
       const transformed = this.transformRequestForPromptToolUse(request, provider)
       
-      const adapter = new PerplexityAdapter(provider, account)
+      const adapter = new PerplexityAdapter(provider, account, outboundProxy)
       
       const { stream, sessionId } = await adapter.chatCompletion({
         model: actualModel,
@@ -1282,6 +1502,7 @@ export class RequestForwarder {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
         latency,
+        failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown',
       }
     }
   }

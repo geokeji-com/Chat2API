@@ -28,6 +28,66 @@ export interface CredentialField {
 
 export type LoadBalanceStrategy = 'round-robin' | 'fill-first' | 'failover'
 
+export type AccountProxyMode = 'none' | 'auto'
+
+export type ProxyNodeStatus = 'active' | 'inactive' | 'error' | 'cooldown'
+
+export interface ProxyBinding {
+  proxyId?: string
+  assignedAt?: number
+  lastSwitchAt?: number
+  switchCount?: number
+}
+
+export interface ProxyGeoInfo {
+  province?: string
+  city?: string
+  regionCode?: string
+}
+
+export interface ProxyGeoResolveResult {
+  id: string
+  success: boolean
+  geo?: ProxyGeoInfo
+  node?: ProxyNode
+  error?: string
+}
+
+export interface ProxyGeoResolveBatchResult {
+  total: number
+  resolved: number
+  skipped: number
+  failed: number
+  results: ProxyGeoResolveResult[]
+}
+
+export interface ProxyNode {
+  id: string
+  name: string
+  host: string
+  port: number
+  username?: string
+  password?: string
+  province?: string
+  city?: string
+  regionCode?: string
+  enabled: boolean
+  status: ProxyNodeStatus
+  lastCheckedAt?: number
+  lastFailedAt?: number
+  cooldownUntil?: number
+  failureCount?: number
+  errorMessage?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ProxyPoolConfig {
+  failThreshold: number
+  cooldownMs: number
+  testTimeoutMs: number
+}
+
 export type Theme = 'light' | 'dark' | 'system'
 
 export type {
@@ -49,6 +109,9 @@ export interface Account {
   requestCount?: number
   dailyLimit?: number
   todayUsed?: number
+  proxyMode?: AccountProxyMode
+  proxyBinding?: ProxyBinding
+  featureConfig?: AccountFeatureConfig
 }
 
 export interface Provider {
@@ -109,6 +172,8 @@ export interface AppConfig {
   toolCallingConfig: ToolCallingConfig
   toolPromptConfig?: LegacyToolPromptConfig
   managementApi: ManagementApiConfig
+  deepSeekPostShareFollowUp: DeepSeekPostShareFollowUpConfig
+  proxyPoolConfig: ProxyPoolConfig
   contextManagement?: unknown
   language: 'zh-CN' | 'en-US'
 }
@@ -216,6 +281,16 @@ export interface ManagementApiConfig {
   managementApiPort?: number
 }
 
+export interface DeepSeekPostShareFollowUpConfig {
+  enabled: boolean
+  prompts: string[]
+  delayMs: number
+}
+
+export interface AccountFeatureConfig {
+  deepSeekPostShareFollowUp?: DeepSeekPostShareFollowUpConfig
+}
+
 export interface ManagementApiResponse<T = unknown> {
   success: boolean
   data?: T
@@ -277,6 +352,7 @@ export interface CreateAccountRequest {
   email?: string
   credentials: Record<string, string>
   dailyLimit?: number
+  proxyMode?: AccountProxyMode
 }
 
 export interface UpdateAccountRequest {
@@ -284,6 +360,9 @@ export interface UpdateAccountRequest {
   email?: string
   credentials?: Record<string, string>
   dailyLimit?: number
+  proxyMode?: AccountProxyMode
+  proxyBinding?: ProxyBinding
+  featureConfig?: AccountFeatureConfig
 }
 
 export interface CreateApiKeyRequest {

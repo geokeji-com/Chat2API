@@ -20,6 +20,7 @@ import {
 import { getProviderToolProfile } from '../toolCalling/providerProfiles'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
 import type { ToolCallingPlan } from '../toolCalling/types'
+import { applyAxiosProxyConfig, type OutboundProxyContext } from '../proxyTransport'
 
 const GLM_API_BASE = 'https://chatglm.cn/chatglm'
 const DEFAULT_ASSISTANT_ID = '65940acff94777010aa6b796'
@@ -108,10 +109,12 @@ function generateSign(): { timestamp: string; nonce: string; sign: string } {
 export class GLMAdapter {
   private provider: Provider
   private account: Account
+  private outboundProxy?: OutboundProxyContext
 
-  constructor(provider: Provider, account: Account) {
+  constructor(provider: Provider, account: Account, outboundProxy?: OutboundProxyContext) {
     this.provider = provider
     this.account = account
+    this.outboundProxy = outboundProxy
   }
 
   private getRefreshToken(): string {
@@ -131,7 +134,7 @@ export class GLMAdapter {
     const response = await axios.post(
       `${GLM_API_BASE}/user-api/user/refresh`,
       {},
-      {
+      applyAxiosProxyConfig({
         headers: {
           Authorization: `Bearer ${refreshToken}`,
           ...FAKE_HEADERS,
@@ -143,7 +146,7 @@ export class GLMAdapter {
         },
         timeout: 15000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     console.log('[GLM] Token response:', JSON.stringify(response.data, null, 2))
@@ -551,7 +554,7 @@ GLM STRICT RULES:
           },
         },
       },
-      {
+      applyAxiosProxyConfig({
         headers: {
           Authorization: `Bearer ${token}`,
           ...FAKE_HEADERS,
@@ -564,7 +567,7 @@ GLM STRICT RULES:
         timeout: 120000,
         validateStatus: () => true,
         responseType: 'stream',
-      }
+      }, this.outboundProxy)
     )
 
     return { response, conversationId: '' }

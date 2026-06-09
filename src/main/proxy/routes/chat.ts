@@ -13,6 +13,8 @@ import { streamHandler } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { storeManager } from '../../store/store'
+import { proxyPoolManager } from '../proxyPool'
+import { createFinalResponseTransform, shouldIncludeFinalResponse } from '../streamFinalResponse'
 import { 
   isAnthropicToolFormat,
   transformResponseToAnthropic,
@@ -192,9 +194,15 @@ router.post('/completions', async (ctx: Context) => {
     if (!result.success) {
       proxyStatusManager.recordRequestFailure(latency)
 
-      if (result.status && result.status >= 400 && result.status !== 429) {
+      if (result.failureType !== 'proxy' && result.status && result.status >= 400 && result.status !== 429) {
         loadBalancer.markAccountFailed(account.id)
       }
+
+      const errorCode = result.error === 'no_available_proxy'
+        ? 'no_available_proxy'
+        : result.failureType === 'proxy'
+          ? 'proxy_error'
+          : null
 
       ctx.status = result.status || 500
       ctx.body = {
@@ -202,7 +210,7 @@ router.post('/completions', async (ctx: Context) => {
           message: result.error || 'Request failed',
           type: 'api_error',
           param: null,
-          code: null,
+          code: errorCode,
         },
       }
 
@@ -220,7 +228,7 @@ router.post('/completions', async (ctx: Context) => {
           message: result.error || 'Request failed',
           type: 'api_error',
           param: null,
-          code: null,
+          code: errorCode,
         },
       })
       storeManager.addRequestLog({
@@ -235,6 +243,8 @@ router.post('/completions', async (ctx: Context) => {
         providerName: provider.name,
         accountId: account.id,
         accountName: account.name,
+        proxyId: result.proxyId,
+        proxyName: result.proxyName,
         requestBody: JSON.stringify(request),
         userInput,
         webSearch: request.web_search,
@@ -294,6 +304,8 @@ router.post('/completions', async (ctx: Context) => {
         providerName: provider.name,
         accountId: account.id,
         accountName: account.name,
+        proxyId: result.proxyId,
+        proxyName: result.proxyName,
         requestBody: JSON.stringify(request),
         userInput,
         webSearch: request.web_search,
@@ -318,6 +330,8 @@ router.post('/completions', async (ctx: Context) => {
         providerName: provider.name,
         accountId: account.id,
         accountName: account.name,
+        proxyId: result.proxyId,
+        proxyName: result.proxyName,
         requestBody: JSON.stringify(request),
         userInput,
         webSearch: request.web_search,
@@ -342,10 +356,34 @@ router.post('/completions', async (ctx: Context) => {
 
       // Collect stream content for logging (raw SSE output)
       let collectedContent = ''
+      let streamClosed = false
+      const includeFinalResponse = shouldIncludeFinalResponse(
+        request,
+        ctx.get('X-Include-Final-Response')
+      )
+
+      const finishWrapperStream = () => {
+        if (streamClosed) return
+        streamClosed = true
+
+        // Update log with collected response
+        if (logEntryId) {
+          storeManager.updateRequestLog(logEntryId, {
+            responseBody: collectedContent || undefined,
+          })
+        }
+        wrapperStream.end()
+      }
 
       // Handle stream errors
-      result.stream.once('error', (err: Error) => {
+      const handleStreamError = (err: Error) => {
+        if (streamClosed) return
+        streamClosed = true
+
         console.error('[Chat] Stream error:', err.message)
+        if (result.proxyId) {
+          proxyPoolManager.markNodeFailed(result.proxyId, err.message)
+        }
 
         // Send error as SSE event
         const errorEvent = {
@@ -372,27 +410,34 @@ router.post('/completions', async (ctx: Context) => {
           accountId: account.id,
           model: request.model,
         })
-      })
+      }
 
-      // Check if stream is already in correct SSE format (from adapters like Kimi, GLM, DeepSeek)
-      if (result.skipTransform) {
-        // Stream is already formatted, pipe through wrapper and collect
-        result.stream.on('data', (chunk: Buffer) => {
+      result.stream.once('error', handleStreamError)
+
+      const pipeOutputStream = (sourceStream: NodeJS.ReadableStream) => {
+        const finalResponseTransform = includeFinalResponse
+          ? createFinalResponseTransform({ model: actualModel, responseId: requestId })
+          : undefined
+        const outputStream = finalResponseTransform || sourceStream
+
+        // Collect from final output so logs match the client-visible stream.
+        outputStream.on('data', (chunk: Buffer) => {
           collectedContent += chunk.toString()
         })
 
-        result.stream.pipe(wrapperStream, { end: false })
+        outputStream.once('error', handleStreamError)
+        outputStream.pipe(wrapperStream, { end: false })
+        outputStream.once('end', finishWrapperStream)
 
-        // When source stream ends normally, update log and end wrapper
-        result.stream.once('end', () => {
-          // Update log with collected response
-          if (logEntryId) {
-            storeManager.updateRequestLog(logEntryId, {
-              responseBody: collectedContent || undefined,
-            })
-          }
-          wrapperStream.end()
-        })
+        if (finalResponseTransform) {
+          sourceStream.pipe(finalResponseTransform)
+        }
+      }
+
+      // Check if stream is already in correct SSE format (from adapters like Kimi, GLM, DeepSeek)
+      if (result.skipTransform) {
+        // Stream is already formatted.
+        pipeOutputStream(result.stream)
       } else {
         // Need to transform the stream
         const transformStream = streamHandler.createTransformStream(
@@ -403,23 +448,8 @@ router.post('/completions', async (ctx: Context) => {
           }
         )
 
-        // Collect from transform stream output
-        transformStream.on('data', (chunk: Buffer) => {
-          collectedContent += chunk.toString()
-        })
-
+        pipeOutputStream(transformStream)
         result.stream.pipe(transformStream)
-        transformStream.pipe(wrapperStream, { end: false })
-
-        transformStream.once('end', () => {
-          // Update log with collected response
-          if (logEntryId) {
-            storeManager.updateRequestLog(logEntryId, {
-              responseBody: collectedContent || undefined,
-            })
-          }
-          wrapperStream.end()
-        })
       }
 
       ctx.body = wrapperStream

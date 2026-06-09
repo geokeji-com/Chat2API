@@ -12,6 +12,7 @@ import sessionsRouter from './sessions'
 import statisticsRouter from './statistics'
 import proxyRouter from './proxy'
 import toolCallingRouter from './toolCalling'
+import proxyPoolRouter from './proxyPool'
 
 export {
   configRouter,
@@ -23,6 +24,7 @@ export {
   statisticsRouter,
   proxyRouter,
   toolCallingRouter,
+  proxyPoolRouter,
 }
 
 export default [
@@ -35,4 +37,5 @@ export default [
   statisticsRouter,
   proxyRouter,
   toolCallingRouter,
+  proxyPoolRouter,
 ]

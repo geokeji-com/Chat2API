@@ -18,6 +18,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { 
   ExternalLink, 
   User, 
@@ -29,7 +30,7 @@ import {
   Copy,
   Check
 } from 'lucide-react'
-import type { Provider, CredentialField, Account, BuiltinProviderConfig, ProviderVendor } from '@/types/electron'
+import type { Provider, CredentialField, Account, AccountProxyMode, BuiltinProviderConfig, ProviderVendor } from '@/types/electron'
 
 /**
  * Map OAuth credentials to provider credential field names
@@ -38,6 +39,42 @@ import type { Provider, CredentialField, Account, BuiltinProviderConfig, Provide
  */
 function mapOAuthCredentials(providerId: string | undefined, credentials: Record<string, string>): Record<string, string> {
   if (!providerId) return credentials
+
+  if (providerId === 'kimi') {
+    const mapped: Record<string, string> = {}
+    const token = credentials.token
+      || credentials.accessToken
+      || credentials.access_token
+      || credentials['kimi-auth']
+
+    if (token) {
+      mapped.token = token
+    }
+
+    const rawCookies = (credentials as any).cookies
+    if (typeof rawCookies === 'string' && rawCookies.trim()) {
+      mapped.cookies = rawCookies
+    } else if (rawCookies && typeof rawCookies === 'object') {
+      mapped.cookies = Object.entries(rawCookies)
+        .filter((entry): entry is [string, string] =>
+          typeof entry[0] === 'string'
+          && typeof entry[1] === 'string'
+          && entry[0].length > 0
+          && entry[1].length > 0
+        )
+        .map(([key, value]) => `${key}=${value}`)
+        .join('; ')
+    }
+
+    if (credentials.deviceId || credentials.device_id) {
+      mapped.deviceId = credentials.deviceId || credentials.device_id
+    }
+    if (credentials.sessionId || credentials.session_id) {
+      mapped.sessionId = credentials.sessionId || credentials.session_id
+    }
+
+    return Object.keys(mapped).length > 0 ? mapped : credentials
+  }
 
   const credentialKeyMap: Record<string, string> = {
     'glm': 'chatglm_refresh_token',
@@ -122,6 +159,7 @@ interface AddAccountDialogProps {
     email?: string
     credentials: Record<string, string>
     dailyLimit?: number
+    proxyMode?: AccountProxyMode
   }) => Promise<void>
   onValidateToken: (providerId: string, credentials: Record<string, string>) => Promise<{
     valid: boolean
@@ -151,6 +189,7 @@ export function AddAccountDialog({
   const [name, setName] = useState('')
   const [dailyLimit, setDailyLimit] = useState<string>('')
   const [credentials, setCredentials] = useState<Record<string, string>>({})
+  const [proxyMode, setProxyMode] = useState<AccountProxyMode>('none')
   const [isValidating, setIsValidating] = useState(false)
   const [validationResult, setValidationResult] = useState<{
     valid?: boolean
@@ -177,6 +216,7 @@ export function AddAccountDialog({
         setName(editingAccount.name)
         setDailyLimit(editingAccount.dailyLimit?.toString() || '')
         setCredentials(editingAccount.credentials || {})
+        setProxyMode(editingAccount.proxyMode === 'auto' ? 'auto' : 'none')
         setActiveTab('manual')
       } else {
         resetForm()
@@ -188,6 +228,7 @@ export function AddAccountDialog({
     setName('')
     setDailyLimit('')
     setCredentials({})
+    setProxyMode('none')
     setValidationResult({})
     setActiveTab('manual')
     setIsOAuthLoading(false)
@@ -272,6 +313,7 @@ export function AddAccountDialog({
         name: name.trim(),
         credentials: finalCredentials,
         dailyLimit: dailyLimit ? parseInt(dailyLimit, 10) : undefined,
+        proxyMode,
       }
 
       if (isEditing && editingAccount && onUpdateAccount) {
@@ -373,6 +415,20 @@ export function AddAccountDialog({
                 value={dailyLimit}
                 onChange={(e) => setDailyLimit(e.target.value)}
               />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="proxyMode">{t('providers.proxyMode')}</Label>
+              <Select value={proxyMode} onValueChange={(value) => setProxyMode(value as AccountProxyMode)}>
+                <SelectTrigger id="proxyMode">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">{t('providers.proxyModeNone')}</SelectItem>
+                  <SelectItem value="auto">{t('providers.proxyModeAuto')}</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">{t('providers.proxyModeHelp')}</p>
             </div>
 
             {supportsOAuth && !isEditing && (
@@ -560,6 +616,21 @@ function CredentialFieldsForm({ fields, credentials, onChange, t, providerId }: 
           label: t('kimi.accessToken'),
           placeholder: t('kimi.accessTokenPlaceholder'),
           helpText: t('kimi.accessTokenHelp'),
+        },
+        cookies: {
+          label: t('kimi.cookies'),
+          placeholder: t('kimi.cookiesPlaceholder'),
+          helpText: t('kimi.cookiesHelp'),
+        },
+        deviceId: {
+          label: t('kimi.deviceId'),
+          placeholder: t('kimi.deviceIdPlaceholder'),
+          helpText: t('kimi.deviceIdHelp'),
+        },
+        sessionId: {
+          label: t('kimi.sessionId'),
+          placeholder: t('kimi.sessionIdPlaceholder'),
+          helpText: t('kimi.sessionIdHelp'),
         },
       },
       minimax: {

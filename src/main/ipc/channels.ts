@@ -45,6 +45,17 @@ export const IpcChannels = {
   ACCOUNTS_GET_CREDITS: 'accounts:getCredits',
   ACCOUNTS_CLEAR_CHATS: 'accounts:clearChats',
 
+  PROXY_POOL_GET_ALL: 'proxyPool:getAll',
+  PROXY_POOL_GET_BY_ID: 'proxyPool:getById',
+  PROXY_POOL_ADD: 'proxyPool:add',
+  PROXY_POOL_UPDATE: 'proxyPool:update',
+  PROXY_POOL_DELETE: 'proxyPool:delete',
+  PROXY_POOL_TEST: 'proxyPool:test',
+  PROXY_POOL_RESOLVE_GEO: 'proxyPool:resolveGeo',
+  PROXY_POOL_RESOLVE_ALL_GEO: 'proxyPool:resolveAllGeo',
+  PROXY_POOL_ASSIGN_ACCOUNT: 'proxyPool:assignAccount',
+  PROXY_POOL_RELEASE_ACCOUNT: 'proxyPool:releaseAccount',
+
   OAUTH_START_LOGIN: 'oauth:startLogin',
   OAUTH_CANCEL_LOGIN: 'oauth:cancelLogin',
   OAUTH_CALLBACK: 'oauth:callback',

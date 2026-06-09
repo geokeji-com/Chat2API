@@ -18,6 +18,7 @@ import {
   createBaseChunk,
   ToolCallState 
 } from '../utils/streamToolHandler'
+import { applyAxiosProxyConfig, type OutboundProxyContext } from '../proxyTransport'
 
 const ZAI_API_BASE = 'https://chat.z.ai'
 const X_FE_VERSION = 'prod-fe-1.1.37'
@@ -111,10 +112,12 @@ export class ZaiAdapter {
   private provider: Provider
   private account: Account
   private token: string | null = null
+  private outboundProxy?: OutboundProxyContext
 
-  constructor(provider: Provider, account: Account) {
+  constructor(provider: Provider, account: Account, outboundProxy?: OutboundProxyContext) {
     this.provider = provider
     this.account = account
+    this.outboundProxy = outboundProxy
   }
 
   private getToken(): string {
@@ -253,7 +256,7 @@ export class ZaiAdapter {
     const response = await axios.post(
       `${ZAI_API_BASE}/api/v1/chats/new`,
       requestBody,
-      {
+      applyAxiosProxyConfig({
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
@@ -263,7 +266,7 @@ export class ZaiAdapter {
         },
         timeout: 15000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     if (response.status !== 200 && response.status !== 201) {
@@ -520,7 +523,7 @@ export class ZaiAdapter {
     const response = await axios.post(
       `${ZAI_API_BASE}/api/v2/chat/completions?${queryParams.toString()}`,
       requestBody,
-      {
+      applyAxiosProxyConfig({
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
@@ -534,7 +537,7 @@ export class ZaiAdapter {
         responseType: 'stream',
         timeout: 120000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     console.log('[Z.ai] Response status:', response.status)

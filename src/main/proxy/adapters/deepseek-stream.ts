@@ -59,7 +59,7 @@ export class DeepSeekStreamHandler {
   private thinkingStarted: boolean = false
   private accumulatedTokenUsage: number = 2
   private created: number
-  private onEnd?: () => void
+  private onEnd?: (shareInfo: DeepSeekShareInfo | undefined, finishReason: string) => void
   private toolStreamParser?: ToolStreamParser
   private toolCallingPlan?: ToolCallingPlan
   private webSearchEnabled: boolean
@@ -72,7 +72,7 @@ export class DeepSeekStreamHandler {
   constructor(
     model: string,
     sessionId: string,
-    onEnd?: () => void,
+    onEnd?: (shareInfo: DeepSeekShareInfo | undefined, finishReason: string) => void,
     webSearchEnabled: boolean = false,
     reasoningEffort?: string,
     toolCallingPlan?: ToolCallingPlan,
@@ -507,7 +507,7 @@ export class DeepSeekStreamHandler {
     transStream.end()
     
     // Call end callback
-    void this.onEnd?.()
+    void this.onEnd?.(this.shareInfo, finishReason)
   }
 
   async handleNonStream(stream: NodeJS.ReadableStream): Promise<any> {

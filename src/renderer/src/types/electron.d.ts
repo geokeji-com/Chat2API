@@ -10,7 +10,7 @@ import type {
   RpaTarget,
 } from '../../../shared/rpa'
 
-import type { 
+import type {
   Provider, 
   Account, 
   ProxyStatus, 
@@ -34,6 +34,15 @@ import type {
   ToolCallingConfig,
   LegacyToolPromptConfig,
   EffectiveModel,
+  DeepSeekPostShareFollowUpConfig,
+  AccountFeatureConfig,
+  AccountProxyMode,
+  ProxyNode,
+  ProxyNodeStatus,
+  ProxyBinding,
+  ProxyPoolConfig,
+  ProxyGeoResolveResult,
+  ProxyGeoResolveBatchResult,
 } from '../../../shared/types'
 
 export type { 
@@ -60,6 +69,15 @@ export type {
   ToolCallingConfig,
   LegacyToolPromptConfig,
   EffectiveModel,
+  DeepSeekPostShareFollowUpConfig,
+  AccountFeatureConfig,
+  AccountProxyMode,
+  ProxyNode,
+  ProxyNodeStatus,
+  ProxyBinding,
+  ProxyPoolConfig,
+  ProxyGeoResolveResult,
+  ProxyGeoResolveBatchResult,
 }
 
 export interface CustomProviderFormData {
@@ -144,6 +162,7 @@ interface AccountsAPI {
     email?: string
     credentials: Record<string, string>
     dailyLimit?: number
+    proxyMode?: AccountProxyMode
   }) => Promise<Account>
   update: (id: string, updates: Partial<Account>) => Promise<Account | null>
   delete: (id: string) => Promise<boolean>
@@ -167,6 +186,29 @@ interface AccountsAPI {
     expiresAt?: number // Credit reset timestamp (milliseconds)
   } | null>
   clearChats: (accountId: string) => Promise<{ success: boolean; error?: string }>
+}
+
+interface ProxyPoolAPI {
+  getAll: (includeSecrets?: boolean) => Promise<ProxyNode[]>
+  getById: (id: string, includeSecrets?: boolean) => Promise<ProxyNode | null>
+  add: (data: {
+    name: string
+    host: string
+    port: number
+    username?: string
+    password?: string
+    province?: string
+    city?: string
+    regionCode?: string
+    enabled?: boolean
+  }) => Promise<ProxyNode>
+  update: (id: string, updates: Partial<ProxyNode>) => Promise<ProxyNode | null>
+  delete: (id: string) => Promise<boolean>
+  test: (id: string) => Promise<{ success: boolean; latency?: number; error?: string; node?: ProxyNode }>
+  resolveGeo: (id: string, force?: boolean) => Promise<ProxyGeoResolveResult>
+  resolveAllGeo: (force?: boolean) => Promise<ProxyGeoResolveBatchResult>
+  assignAccount: (accountId: string) => Promise<{ account: Account; proxyNode?: ProxyNode; error?: string }>
+  releaseAccount: (accountId: string) => Promise<Account>
 }
 
 interface RpaAPI {
@@ -362,6 +404,8 @@ interface RequestLogEntry {
   providerName?: string
   accountId?: string
   accountName?: string
+  proxyId?: string
+  proxyName?: string
   requestBody?: string
   userInput?: string
   /** Web search enabled */
@@ -492,6 +536,7 @@ interface ElectronAPI {
   store: StoreAPI
   providers: ProvidersAPI
   accounts: AccountsAPI
+  proxyPool: ProxyPoolAPI
   rpa: RpaAPI
   oauth: OAuthAPI
   logs: LogsAPI

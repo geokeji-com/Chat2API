@@ -1,6 +1,7 @@
-import { net } from 'electron'
+import { net, session as electronSession, type Session } from 'electron'
 import { Readable } from 'stream'
-import { Account, Provider } from '../store/types'
+import { Account, Provider } from '../../store/types'
+import { buildSocksProxyUrl, type OutboundProxyContext } from '../proxyTransport'
 
 const PERPLEXITY_URL = 'https://www.perplexity.ai'
 const QUERY_ENDPOINT = `${PERPLEXITY_URL}/rest/sse/perplexity_ask`
@@ -160,10 +161,12 @@ export class PerplexityAdapter {
   private account: Account
   private cookie: string
   private allCookies: StoredCookies
+  private outboundProxy?: OutboundProxyContext
 
-  constructor(provider: Provider, account: Account) {
+  constructor(provider: Provider, account: Account, outboundProxy?: OutboundProxyContext) {
     this.provider = provider
     this.account = account
+    this.outboundProxy = outboundProxy
     this.cookie = account.credentials.sessionToken || account.credentials.cookie || account.credentials.token || ''
     // Store all cookies from credentials for Cloudflare-protected requests
     this.allCookies = account.credentials.cookies || {}
@@ -171,6 +174,17 @@ export class PerplexityAdapter {
     if (this.cookie && !this.allCookies['__Secure-next-auth.session-token']) {
       this.allCookies['__Secure-next-auth.session-token'] = this.cookie
     }
+  }
+
+  private async getProxySession(): Promise<Session | undefined> {
+    if (!this.outboundProxy) return undefined
+
+    const requestSession = electronSession.fromPartition(`persist:chat2api-proxy-${this.outboundProxy.node.id}`)
+    await requestSession.setProxy({
+      proxyRules: buildSocksProxyUrl(this.outboundProxy.node),
+      proxyBypassRules: '<-loopback>',
+    })
+    return requestSession
   }
 
   private buildCookieHeader(): string {
@@ -314,9 +328,11 @@ export class PerplexityAdapter {
 
     // Use Electron's net API which uses Chromium's network stack
     // This bypasses Cloudflare's TLS fingerprint detection
+    const requestSession = await this.getProxySession()
     const request_ = net.request({
       method: 'POST',
       url: QUERY_ENDPOINT,
+      session: requestSession,
     })
 
     for (const [key, value] of Object.entries(headers)) {
@@ -457,10 +473,12 @@ export class PerplexityAdapter {
         read_write_token: sessionData.read_write_token || '',
       }
 
+      const requestSession = await this.getProxySession()
       return new Promise((resolve) => {
         const request_ = net.request({
           method: 'DELETE',
           url: deleteUrl,
+          session: requestSession,
         })
 
         for (const [key, value] of Object.entries(headers)) {
@@ -526,10 +544,12 @@ export class PerplexityAdapter {
       'x-perplexity-request-try-number': '1',
     }
 
+    const requestSession = await this.getProxySession()
     return new Promise((resolve) => {
       const request_ = net.request({
         method: 'DELETE',
         url: deleteUrl,
+        session: requestSession,
       })
 
       for (const [key, value] of Object.entries(headers)) {

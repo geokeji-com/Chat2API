@@ -12,6 +12,9 @@ import type {
   LogEntry,
   ProviderVendor,
   AppConfig,
+  ProxyNode,
+  ProxyGeoResolveResult,
+  ProxyGeoResolveBatchResult,
   SystemPrompt,
   PromptType,
   EffectiveModel,
@@ -155,6 +158,7 @@ const accountsAPI = {
     email?: string
     credentials: Record<string, string>
     dailyLimit?: number
+    proxyMode?: Account['proxyMode']
   }): Promise<Account> => 
     ipcRenderer.invoke(IpcChannels.ACCOUNTS_ADD, data),
   
@@ -188,6 +192,48 @@ const accountsAPI = {
 
   clearChats: (accountId: string): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke(IpcChannels.ACCOUNTS_CLEAR_CHATS, accountId),
+}
+
+const proxyPoolAPI = {
+  getAll: (includeSecrets?: boolean): Promise<ProxyNode[]> =>
+    ipcRenderer.invoke(IpcChannels.PROXY_POOL_GET_ALL, includeSecrets),
+
+  getById: (id: string, includeSecrets?: boolean): Promise<ProxyNode | null> =>
+    ipcRenderer.invoke(IpcChannels.PROXY_POOL_GET_BY_ID, id, includeSecrets),
+
+  add: (data: {
+    name: string
+    host: string
+    port: number
+    username?: string
+    password?: string
+    province?: string
+    city?: string
+    regionCode?: string
+    enabled?: boolean
+  }): Promise<ProxyNode> =>
+    ipcRenderer.invoke(IpcChannels.PROXY_POOL_ADD, data),
+
+  update: (id: string, updates: Partial<ProxyNode>): Promise<ProxyNode | null> =>
+    ipcRenderer.invoke(IpcChannels.PROXY_POOL_UPDATE, id, updates),
+
+  delete: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.PROXY_POOL_DELETE, id),
+
+  test: (id: string): Promise<{ success: boolean; latency?: number; error?: string; node?: ProxyNode }> =>
+    ipcRenderer.invoke(IpcChannels.PROXY_POOL_TEST, id),
+
+  resolveGeo: (id: string, force?: boolean): Promise<ProxyGeoResolveResult> =>
+    ipcRenderer.invoke(IpcChannels.PROXY_POOL_RESOLVE_GEO, id, force),
+
+  resolveAllGeo: (force?: boolean): Promise<ProxyGeoResolveBatchResult> =>
+    ipcRenderer.invoke(IpcChannels.PROXY_POOL_RESOLVE_ALL_GEO, force),
+
+  assignAccount: (accountId: string): Promise<{ account: Account; proxyNode?: ProxyNode; error?: string }> =>
+    ipcRenderer.invoke(IpcChannels.PROXY_POOL_ASSIGN_ACCOUNT, accountId),
+
+  releaseAccount: (accountId: string): Promise<Account> =>
+    ipcRenderer.invoke(IpcChannels.PROXY_POOL_RELEASE_ACCOUNT, accountId),
 }
 
 type ProviderType = ProviderVendor
@@ -741,6 +787,7 @@ const electronAPI = {
   store: storeAPI,
   providers: providersAPI,
   accounts: accountsAPI,
+  proxyPool: proxyPoolAPI,
   oauth: oauthAPI,
   logs: logsAPI,
   requestLogs: requestLogsAPI,

@@ -351,6 +351,27 @@ export class ConfigManager {
         errors.push('toolCallingConfig.clientAdapterId must be one of: standard-openai-tools, cherry-studio-mcp')
       }
     }
+
+    if (config.deepSeekPostShareFollowUp) {
+      const followUpConfig = config.deepSeekPostShareFollowUp
+      if (followUpConfig.enabled !== undefined && typeof followUpConfig.enabled !== 'boolean') {
+        errors.push('deepSeekPostShareFollowUp.enabled must be a boolean')
+      }
+      if (
+        followUpConfig.prompts !== undefined &&
+        (!Array.isArray(followUpConfig.prompts)
+          || followUpConfig.prompts.length !== 2
+          || followUpConfig.prompts.some(prompt => typeof prompt !== 'string' || prompt.trim().length === 0))
+      ) {
+        errors.push('deepSeekPostShareFollowUp.prompts must contain exactly two non-empty strings')
+      }
+      if (
+        followUpConfig.delayMs !== undefined &&
+        (!Number.isFinite(followUpConfig.delayMs) || followUpConfig.delayMs < 0)
+      ) {
+        errors.push('deepSeekPostShareFollowUp.delayMs must be a non-negative number')
+      }
+    }
     
     return {
       valid: errors.length === 0,

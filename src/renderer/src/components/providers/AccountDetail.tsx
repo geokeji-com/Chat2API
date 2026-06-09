@@ -32,10 +32,12 @@ import {
   Trash2,
   ArrowLeft,
   TrendingUp,
-  Coins
+  Coins,
+  Network
 } from 'lucide-react'
-import type { Account, AccountStatus, Provider } from '@/types/electron'
+import type { Account, AccountStatus, DeepSeekPostShareFollowUpConfig, Provider } from '@/types/electron'
 import { cn } from '@/lib/utils'
+import { DeepSeekAccountFollowUpCard } from './DeepSeekFollowUpConfig'
 
 interface AccountDetailProps {
   account: Account
@@ -44,6 +46,8 @@ interface AccountDetailProps {
   onEdit: () => void
   onDelete: () => void
   onValidate: () => Promise<void>
+  onUpdate: (updates: Partial<Account>) => Promise<void>
+  deepSeekDefaultFollowUpConfig?: DeepSeekPostShareFollowUpConfig
 }
 
 export function AccountDetail({
@@ -53,6 +57,8 @@ export function AccountDetail({
   onEdit,
   onDelete,
   onValidate,
+  onUpdate,
+  deepSeekDefaultFollowUpConfig,
 }: AccountDetailProps) {
   const { t, i18n } = useTranslation()
   const [isValidating, setIsValidating] = useState(false)
@@ -64,6 +70,7 @@ export function AccountDetail({
     expiresAt?: number
   } | null>(null)
   const [isLoadingCredits, setIsLoadingCredits] = useState(false)
+  const [isProxyUpdating, setIsProxyUpdating] = useState(false)
   const [trendData, setTrendData] = useState<{ date: string; total: number; info: number; warn: number; error: number }[]>([])
 
   useEffect(() => {
@@ -80,6 +87,7 @@ export function AccountDetail({
   }, [account.id])
 
   const isMiniMaxProvider = provider?.id === 'minimax'
+  const isDeepSeekProvider = provider?.id === 'deepseek'
 
   const statusConfig: Record<AccountStatus, { 
     labelKey: string
@@ -170,6 +178,18 @@ export function AccountDetail({
       console.error('Failed to get credits:', error)
     } finally {
       setIsLoadingCredits(false)
+    }
+  }
+
+  const updateProxyMode = async (proxyMode: Account['proxyMode']) => {
+    setIsProxyUpdating(true)
+    try {
+      await onUpdate({
+        proxyMode,
+        proxyBinding: proxyMode === 'none' ? undefined : account.proxyBinding,
+      })
+    } finally {
+      setIsProxyUpdating(false)
     }
   }
 
@@ -310,6 +330,86 @@ export function AccountDetail({
 
         <Card>
           <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Network className="h-4 w-4" />
+              {t('providers.proxySettings')}
+            </CardTitle>
+            <CardDescription>{t('providers.proxySettingsDesc')}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-muted-foreground">{t('providers.proxyMode')}</span>
+                <Badge variant="outline">
+                  {account.proxyMode === 'auto' ? t('providers.proxyModeAuto') : t('providers.proxyModeNone')}
+                </Badge>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-sm text-muted-foreground">{t('providers.proxyBinding')}</span>
+                <span className="text-sm text-right">
+                  {account.proxyMode === 'auto'
+                    ? account.proxyBinding?.proxyId || t('providers.proxyBindingPending')
+                    : t('providers.proxyDirect')}
+                </span>
+              </div>
+              {account.proxyMode === 'auto' && (
+                <>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground">{t('providers.proxyAssignedAt')}</span>
+                    <span className="text-sm">{formatDate(account.proxyBinding?.assignedAt)}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground">{t('providers.proxyLastSwitchAt')}</span>
+                    <span className="text-sm">{formatDate(account.proxyBinding?.lastSwitchAt)}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground">{t('providers.proxySwitchCount')}</span>
+                    <span className="text-sm">{account.proxyBinding?.switchCount || 0}</span>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              {account.proxyMode === 'auto' ? (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => updateProxyMode('auto')}
+                    disabled={isProxyUpdating}
+                  >
+                    <RefreshCw className={cn('mr-2 h-4 w-4', isProxyUpdating && 'animate-spin')} />
+                    {t('providers.proxyReassign')}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => updateProxyMode('none')}
+                    disabled={isProxyUpdating}
+                  >
+                    {t('providers.proxyRelease')}
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => updateProxyMode('auto')}
+                  disabled={isProxyUpdating}
+                >
+                  <Network className="mr-2 h-4 w-4" />
+                  {t('providers.proxyEnableAuto')}
+                </Button>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-6 md:grid-cols-2">
+        <Card>
+          <CardHeader>
             <CardTitle className="text-base">{t('dashboard.providerStats')}</CardTitle>
           </CardHeader>
           <CardContent>
@@ -404,6 +504,14 @@ export function AccountDetail({
             )}
           </CardContent>
         </Card>
+      )}
+
+      {isDeepSeekProvider && deepSeekDefaultFollowUpConfig && (
+        <DeepSeekAccountFollowUpCard
+          account={account}
+          defaultConfig={deepSeekDefaultFollowUpConfig}
+          onUpdate={onUpdate}
+        />
       )}
 
       <Card>

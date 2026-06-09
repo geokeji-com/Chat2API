@@ -25,6 +25,7 @@ import {
   RequestLogConfig,
   PersistentStatistics,
   DailyStatistics,
+  ProxyNode,
   DEFAULT_STATISTICS,
   EffectiveModel,
   ProviderModelOverrides,
@@ -32,6 +33,7 @@ import {
   UserModelOverrides,
   CustomModel,
   DEFAULT_REQUEST_LOG_CONFIG,
+  DEFAULT_DEEPSEEK_POST_SHARE_FOLLOW_UP_CONFIG,
   createDefaultModelMappings,
   normalizeModelMappingsWithDefaults,
   sanitizeDeepSeekModelOverrides,
@@ -195,6 +197,7 @@ class StoreManager {
     return {
       providers: [],
       accounts: [],
+      proxyNodes: [],
       config: DEFAULT_CONFIG,
       logs: [],
       requestLogs: [],
@@ -246,6 +249,15 @@ class StoreManager {
       ...config,
     }
     const rawToolCallingConfig = rawConfig.toolCallingConfig ?? rawConfig.toolPromptConfig
+    const rawDeepSeekPostShareFollowUp = rawConfig.deepSeekPostShareFollowUp || {}
+    const prompts = Array.isArray(rawDeepSeekPostShareFollowUp.prompts)
+      ? rawDeepSeekPostShareFollowUp.prompts
+          .filter((prompt): prompt is string => typeof prompt === 'string' && prompt.trim().length > 0)
+      : DEFAULT_DEEPSEEK_POST_SHARE_FOLLOW_UP_CONFIG.prompts
+    const followUpPrompts = prompts.length === 2
+      ? prompts
+      : DEFAULT_DEEPSEEK_POST_SHARE_FOLLOW_UP_CONFIG.prompts
+    const delayMs = Number(rawDeepSeekPostShareFollowUp.delayMs)
 
     return {
       ...rawConfig,
@@ -256,6 +268,18 @@ class StoreManager {
       ),
       toolCallingConfig: normalizeToolCallingConfig(rawToolCallingConfig),
       toolPromptConfig: undefined,
+      deepSeekPostShareFollowUp: {
+        ...DEFAULT_DEEPSEEK_POST_SHARE_FOLLOW_UP_CONFIG,
+        ...rawDeepSeekPostShareFollowUp,
+        prompts: followUpPrompts,
+        delayMs: Number.isFinite(delayMs) && delayMs >= 0
+          ? delayMs
+          : DEFAULT_DEEPSEEK_POST_SHARE_FOLLOW_UP_CONFIG.delayMs,
+      },
+      proxyPoolConfig: {
+        ...DEFAULT_CONFIG.proxyPoolConfig,
+        ...(rawConfig.proxyPoolConfig || {}),
+      },
     }
   }
 
@@ -475,6 +499,20 @@ class StoreManager {
     }
     
     return decrypted
+  }
+
+  private encryptProxyNode(node: ProxyNode): ProxyNode {
+    return {
+      ...node,
+      password: node.password ? this.encryptData(node.password) : node.password,
+    }
+  }
+
+  private decryptProxyNode(node: ProxyNode): ProxyNode {
+    return {
+      ...node,
+      password: node.password ? this.decryptData(node.password) : node.password,
+    }
   }
 
   // ==================== Provider Operations ====================
@@ -734,6 +772,97 @@ class StoreManager {
     return active
   }
 
+  // ==================== Proxy Node Operations ====================
+
+  /**
+   * Get All Proxy Nodes
+   */
+  getProxyNodes(includeSecrets: boolean = false): ProxyNode[] {
+    this.ensureInitialized()
+    const nodes = (this.store!.get('proxyNodes') as ProxyNode[]) || []
+    return includeSecrets
+      ? nodes.map((node: ProxyNode) => this.decryptProxyNode(node))
+      : nodes.map((node: ProxyNode) => ({
+          ...node,
+          password: node.password ? '***' : undefined,
+        }))
+  }
+
+  /**
+   * Get Proxy Node By ID
+   */
+  getProxyNodeById(id: string, includeSecrets: boolean = false): ProxyNode | undefined {
+    this.ensureInitialized()
+    const nodes = (this.store!.get('proxyNodes') as ProxyNode[]) || []
+    const node = nodes.find((item: ProxyNode) => item.id === id)
+    if (!node) return undefined
+    return includeSecrets
+      ? this.decryptProxyNode(node)
+      : {
+          ...node,
+          password: node.password ? '***' : undefined,
+        }
+  }
+
+  /**
+   * Add Proxy Node
+   */
+  addProxyNode(node: ProxyNode): void {
+    this.ensureInitialized()
+    const nodes = (this.store!.get('proxyNodes') as ProxyNode[]) || []
+    this.store!.set('proxyNodes', [...nodes, this.encryptProxyNode(node)])
+  }
+
+  /**
+   * Update Proxy Node
+   */
+  updateProxyNode(id: string, updates: Partial<ProxyNode>): ProxyNode | null {
+    this.ensureInitialized()
+    const nodes = (this.store!.get('proxyNodes') as ProxyNode[]) || []
+    const existing = nodes.find((node: ProxyNode) => node.id === id)
+    if (!existing) return null
+
+    const updated: ProxyNode = {
+      ...existing,
+      ...updates,
+      updatedAt: Date.now(),
+    }
+    if (updates.password !== undefined) {
+      updated.password = updates.password ? this.encryptData(updates.password) : undefined
+    }
+
+    this.store!.set('proxyNodes', nodes.map((node: ProxyNode) =>
+      node.id === id ? updated : node
+    ))
+
+    return this.decryptProxyNode(updated)
+  }
+
+  /**
+   * Delete Proxy Node
+   */
+  deleteProxyNode(id: string): boolean {
+    this.ensureInitialized()
+    const nodes = (this.store!.get('proxyNodes') as ProxyNode[]) || []
+    const exists = nodes.some((node: ProxyNode) => node.id === id)
+    if (!exists) return false
+
+    this.store!.set('proxyNodes', nodes.filter((node: ProxyNode) => node.id !== id))
+
+    const accounts = (this.store!.get('accounts') as Account[]) || []
+    const updatedAccounts = accounts.map((account: Account) =>
+      account.proxyBinding?.proxyId === id
+        ? {
+            ...account,
+            proxyBinding: undefined,
+            updatedAt: Date.now(),
+          }
+        : account
+    )
+    this.store!.set('accounts', updatedAccounts)
+    return true
+  }
+
   // ==================== Configuration Operations ====================
 
   /**
@@ -796,6 +925,13 @@ class StoreManager {
         ...currentConfig.requestLogConfig,
         ...updates.requestLogConfig,
       })
+    }
+
+    if (updates.deepSeekPostShareFollowUp) {
+      newConfig.deepSeekPostShareFollowUp = {
+        ...currentConfig.deepSeekPostShareFollowUp,
+        ...updates.deepSeekPostShareFollowUp,
+      }
     }
 
     const normalized = this.normalizeConfig(newConfig)

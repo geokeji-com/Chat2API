@@ -28,7 +28,9 @@ import {
   AlertCircle,
   Activity,
   Plus,
-  Trash
+  Trash,
+  BellPlus,
+  Network,
 } from 'lucide-react'
 import {
   Dialog,
@@ -40,6 +42,11 @@ import {
 } from '@/components/ui/dialog'
 import type { Account, AccountStatus } from '@/types/electron'
 import { cn } from '@/lib/utils'
+import {
+  DeepSeekFollowUpBatchDialog,
+  DeepSeekFollowUpStatusBadge,
+} from './DeepSeekFollowUpConfig'
+import type { DeepSeekPostShareFollowUpConfig } from '@/types/electron'
 
 interface AccountListProps {
   accounts: Account[]
@@ -49,6 +56,8 @@ interface AccountListProps {
   onDeleteAccount: (id: string) => void
   onValidateAccount: (id: string) => void
   onViewDetail: (account: Account) => void
+  deepSeekDefaultFollowUpConfig?: DeepSeekPostShareFollowUpConfig
+  onAccountUpdated?: (accountId: string, updates: Partial<Account>) => void
 }
 
 export function AccountList({
@@ -59,11 +68,14 @@ export function AccountList({
   onDeleteAccount,
   onValidateAccount,
   onViewDetail,
+  deepSeekDefaultFollowUpConfig,
+  onAccountUpdated,
 }: AccountListProps) {
   const { t } = useTranslation()
   const [validatingIds, setValidatingIds] = useState<Set<string>>(new Set())
   const [clearingChatsId, setClearingChatsId] = useState<string | null>(null)
   const [showClearChatsDialog, setShowClearChatsDialog] = useState(false)
+  const [showFollowUpBatchDialog, setShowFollowUpBatchDialog] = useState(false)
   const [selectedAccountForClear, setSelectedAccountForClear] = useState<Account | null>(null)
 
   const statusConfig: Record<AccountStatus, { 
@@ -138,6 +150,7 @@ export function AccountList({
 
   const activeCount = accounts.filter(a => a.status === 'active').length
   const totalCount = accounts.length
+  const isDeepSeekProvider = providerId === 'deepseek'
 
   const formatDate = (timestamp?: number) => {
     if (!timestamp) return '-'
@@ -183,10 +196,18 @@ export function AccountList({
           <span>•</span>
           <span className="text-green-600">{activeCount} {t('providers.onlineCount')}</span>
         </div>
-        <Button size="sm" onClick={onAddAccount}>
-          <Plus className="mr-2 h-4 w-4" />
-          {t('providers.addAccount')}
-        </Button>
+        <div className="flex items-center gap-2">
+          {isDeepSeekProvider && deepSeekDefaultFollowUpConfig && onAccountUpdated && (
+            <Button size="sm" variant="outline" onClick={() => setShowFollowUpBatchDialog(true)}>
+              <BellPlus className="mr-2 h-4 w-4" />
+              {t('deepseek.followUp.batchConfig')}
+            </Button>
+          )}
+          <Button size="sm" onClick={onAddAccount}>
+            <Plus className="mr-2 h-4 w-4" />
+            {t('providers.addAccount')}
+          </Button>
+        </div>
       </div>
 
       <ScrollArea className="h-[calc(100vh-400px)]">
@@ -222,6 +243,15 @@ export function AccountList({
                             <StatusIcon className="mr-1 h-3 w-3" />
                             {t(config.labelKey)}
                           </Badge>
+                          {isDeepSeekProvider && (
+                            <DeepSeekFollowUpStatusBadge account={account} />
+                          )}
+                          <Badge variant="outline" className="text-xs">
+                            <Network className="mr-1 h-3 w-3" />
+                            {account.proxyMode === 'auto'
+                              ? t('providers.proxyModeAuto')
+                              : t('providers.proxyModeNone')}
+                          </Badge>
                         </div>
                         
                         <div className="flex items-center gap-4 mt-1 text-xs text-muted-foreground">
@@ -230,6 +260,11 @@ export function AccountList({
                           )}
                           <span>{t('dashboard.totalRequests')}: {account.requestCount || 0}</span>
                           <span>{t('providers.usedToday')}: {formatUsage(account)}</span>
+                          {account.proxyMode === 'auto' && (
+                            <span>
+                              {t('providers.proxyBinding')}: {account.proxyBinding?.proxyId?.slice(0, 8) || t('providers.proxyBindingPending')}
+                            </span>
+                          )}
                         </div>
                         
                         {account.status === 'error' && account.errorMessage && (
@@ -356,6 +391,16 @@ export function AccountList({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {isDeepSeekProvider && deepSeekDefaultFollowUpConfig && onAccountUpdated && (
+        <DeepSeekFollowUpBatchDialog
+          open={showFollowUpBatchDialog}
+          accounts={accounts}
+          defaultConfig={deepSeekDefaultFollowUpConfig}
+          onOpenChange={setShowFollowUpBatchDialog}
+          onAccountUpdated={onAccountUpdated}
+        />
+      )}
     </div>
   )
 }

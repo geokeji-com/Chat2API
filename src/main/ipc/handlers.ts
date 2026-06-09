@@ -11,6 +11,7 @@ import { oauthManager } from '../oauth/manager'
 import { ProxyServer } from '../proxy/server'
 import { proxyStatusManager } from '../proxy/status'
 import { sessionManager } from '../proxy/sessionManager'
+import { proxyPoolManager } from '../proxy/proxyPool'
 import { TrayManager } from '../tray/TrayManager'
 import { ConfigManager } from '../store/config'
 import { generateManagementSecret } from '../proxy/middleware/managementAuth'
@@ -25,8 +26,8 @@ import { PerplexityAdapter } from '../proxy/adapters/perplexity'
 import { QwenAdapter } from '../proxy/adapters/qwen'
 import { QwenAiAdapter } from '../proxy/adapters/qwen-ai'
 import { ZaiAdapter } from '../proxy/adapters/zai'
-import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor, AppConfig } from '../../shared/types'
-import type { SystemPrompt, SessionConfig, SessionRecord, ManagementApiConfig } from '../store/types'
+import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor } from '../../shared/types'
+import type { AppConfig, ProxyNode, SystemPrompt, SessionConfig, SessionRecord, ManagementApiConfig } from '../store/types'
 import type { ProviderType } from '../oauth/types'
 import type {
   RpaConnectBrowserOptions,
@@ -79,6 +80,8 @@ function applyRuntimeConfigOverrides(config: AppConfig): AppConfig {
     readBooleanEnv('CHAT2API_ENABLE_MANAGEMENT_API') ?? config.managementApi.enableManagementApi
   const managementApiSecret =
     process.env.CHAT2API_MANAGEMENT_API_SECRET?.trim() || config.managementApi.managementApiSecret
+  const deepSeekPostShareFollowUpEnabled =
+    readBooleanEnv('CHAT2API_DEEPSEEK_POST_SHARE_FOLLOW_UP')
 
   return {
     ...config,
@@ -89,6 +92,12 @@ function applyRuntimeConfigOverrides(config: AppConfig): AppConfig {
       ...config.managementApi,
       enableManagementApi,
       managementApiSecret,
+    },
+    deepSeekPostShareFollowUp: {
+      ...config.deepSeekPostShareFollowUp,
+      ...(deepSeekPostShareFollowUpEnabled === undefined
+        ? {}
+        : { enabled: deepSeekPostShareFollowUpEnabled }),
     },
   }
 }
@@ -297,7 +306,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       return
     }
     const store = storeManager.getStore()
-    store?.set(key as 'providers' | 'accounts' | 'config' | 'logs', value as never)
+    store?.set(key as 'providers' | 'accounts' | 'proxyNodes' | 'config' | 'logs', value as never)
     if (key === 'config') {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) {
@@ -313,7 +322,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       return
     }
     const store = storeManager.getStore()
-    store?.delete(key as 'providers' | 'accounts' | 'config' | 'logs')
+    store?.delete(key as 'providers' | 'accounts' | 'proxyNodes' | 'config' | 'logs')
   })
 
   ipcMain.handle(IpcChannels.STORE_CLEAR_ALL, async (): Promise<void> => {
@@ -624,6 +633,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     email?: string
     credentials: Record<string, string>
     dailyLimit?: number
+    proxyMode?: Account['proxyMode']
   }): Promise<Account> => {
     return AccountManager.create(data)
   })
@@ -736,6 +746,56 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
         error: error instanceof Error ? error.message : 'Failed to clear chats' 
       }
     }
+  })
+
+  ipcMain.handle(IpcChannels.PROXY_POOL_GET_ALL, async (_, includeSecrets?: boolean): Promise<ProxyNode[]> => {
+    return proxyPoolManager.getAll(includeSecrets)
+  })
+
+  ipcMain.handle(IpcChannels.PROXY_POOL_GET_BY_ID, async (_, id: string, includeSecrets?: boolean): Promise<ProxyNode | null> => {
+    return proxyPoolManager.getById(id, includeSecrets) || null
+  })
+
+  ipcMain.handle(IpcChannels.PROXY_POOL_ADD, async (_, data: {
+    name: string
+    host: string
+    port: number
+    username?: string
+    password?: string
+    province?: string
+    city?: string
+    regionCode?: string
+    enabled?: boolean
+  }): Promise<ProxyNode> => {
+    return proxyPoolManager.create(data)
+  })
+
+  ipcMain.handle(IpcChannels.PROXY_POOL_UPDATE, async (_, id: string, updates: Partial<ProxyNode>): Promise<ProxyNode | null> => {
+    return proxyPoolManager.update(id, updates)
+  })
+
+  ipcMain.handle(IpcChannels.PROXY_POOL_DELETE, async (_, id: string): Promise<boolean> => {
+    return proxyPoolManager.delete(id)
+  })
+
+  ipcMain.handle(IpcChannels.PROXY_POOL_TEST, async (_, id: string) => {
+    return proxyPoolManager.testNode(id)
+  })
+
+  ipcMain.handle(IpcChannels.PROXY_POOL_RESOLVE_GEO, async (_, id: string, force?: boolean) => {
+    return proxyPoolManager.resolveNodeGeo(id, force)
+  })
+
+  ipcMain.handle(IpcChannels.PROXY_POOL_RESOLVE_ALL_GEO, async (_, force?: boolean) => {
+    return proxyPoolManager.resolveAllGeo(force)
+  })
+
+  ipcMain.handle(IpcChannels.PROXY_POOL_ASSIGN_ACCOUNT, async (_, accountId: string) => {
+    return proxyPoolManager.assignAccount(accountId)
+  })
+
+  ipcMain.handle(IpcChannels.PROXY_POOL_RELEASE_ACCOUNT, async (_, accountId: string): Promise<Account> => {
+    return proxyPoolManager.releaseAccount(accountId)
   })
 
   ipcMain.handle(IpcChannels.OAUTH_START_LOGIN, async (_, providerId: string, providerType: ProviderVendor): Promise<OAuthResult> => {

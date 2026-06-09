@@ -11,6 +11,7 @@ import type { ChatMessage } from '../types.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import { applyAxiosProxyConfig, type OutboundProxyContext } from '../proxyTransport'
 
 const MIMO_API_BASE = 'https://aistudio.xiaomimimo.com'
 
@@ -317,10 +318,12 @@ export function buildMimoQuery(messages: MimoMessage[]): string {
 export class MimoAdapter {
   private provider: Provider
   private account: Account
+  private outboundProxy?: OutboundProxyContext
 
-  constructor(provider: Provider, account: Account) {
+  constructor(provider: Provider, account: Account, outboundProxy?: OutboundProxyContext) {
     this.provider = provider
     this.account = account
+    this.outboundProxy = outboundProxy
   }
 
   private getCredentials(): { serviceToken: string; userId: string; phToken: string } {
@@ -453,13 +456,13 @@ export class MimoAdapter {
       multiMedias: [],
     }
 
-    const response = await axios({
+    const response = await axios(applyAxiosProxyConfig({
       method: 'POST',
       url: this.buildUrl('/open-apis/bot/chat', phToken),
       data: requestBody,
       responseType: 'stream',
       headers: this.buildHeaders(serviceToken, userId, phToken),
-    })
+    }, this.outboundProxy))
 
     return { response, conversationId, query }
   }

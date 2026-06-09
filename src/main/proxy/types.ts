@@ -70,6 +70,10 @@ export interface ChatCompletionRequest {
   top_p?: number
   n?: number
   stream?: boolean
+  stream_options?: {
+    /** Add a final OpenAI-style non-stream response in the last SSE event before [DONE]. */
+    include_final_response?: boolean
+  }
   stop?: string | string[]
   max_tokens?: number
   presence_penalty?: number
@@ -150,6 +154,9 @@ export interface ChatCompletionChoice {
     content: string | null
     reasoning_content?: string
     tool_calls?: ToolCall[]
+    citations?: any[]
+    search_results?: any
+    related_searches?: any[]
   }
   delta?: {
     role?: 'assistant'
@@ -221,6 +228,8 @@ export interface ProxyContext {
   accountId?: string
   model: string
   actualModel?: string
+  proxyId?: string
+  proxyName?: string
   startTime: number
   isStream: boolean
   clientIP?: string
@@ -240,6 +249,9 @@ export interface ForwardResult {
   latency?: number
   providerSessionId?: string
   parentMessageId?: string
+  proxyId?: string
+  proxyName?: string
+  failureType?: 'provider' | 'proxy' | 'network' | 'unknown'
 }
 
 /**
