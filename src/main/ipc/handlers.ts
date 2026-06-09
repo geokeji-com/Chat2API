@@ -15,6 +15,7 @@ import { TrayManager } from '../tray/TrayManager'
 import { ConfigManager } from '../store/config'
 import { generateManagementSecret } from '../proxy/middleware/managementAuth'
 import { UpdaterManager } from '../updater'
+import { rpaLearningManager } from '../rpa'
 import { DeepSeekAdapter } from '../proxy/adapters/deepseek'
 import { GLMAdapter } from '../proxy/adapters/glm'
 import { KimiAdapter } from '../proxy/adapters/kimi'
@@ -27,6 +28,11 @@ import { ZaiAdapter } from '../proxy/adapters/zai'
 import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor, AppConfig } from '../../shared/types'
 import type { SystemPrompt, SessionConfig, SessionRecord, ManagementApiConfig } from '../store/types'
 import type { ProviderType } from '../oauth/types'
+import type {
+  RpaConnectBrowserOptions,
+  RpaLaunchBrowserOptions,
+  RpaStartLearningOptions,
+} from '../../shared/rpa'
 
 let proxyServer: ProxyServer | null = null
 let proxyStartTime: number | null = null
@@ -128,6 +134,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     oauthManager.setMainWindow(mainWindow)
     updaterManager.initialize(mainWindow)
   }
+  rpaLearningManager.setMainWindow(mainWindow)
 
   // Check if auto-start proxy is needed
   const config = applyRuntimeConfigOverrides(storeManager.getConfig())
@@ -835,6 +842,49 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
 
   ipcMain.handle(IpcChannels.REQUEST_LOGS_CLEAR, async (): Promise<void> => {
     storeManager.clearRequestLogs()
+  })
+
+  // ==================== RPA Interface Learning Handlers ====================
+
+  ipcMain.handle(IpcChannels.RPA_LAUNCH_BROWSER, async (_, options?: RpaLaunchBrowserOptions) => {
+    try {
+      return await rpaLearningManager.launchBrowser(options || {})
+    } catch (error) {
+      return {
+        connected: false,
+        host: 'localhost',
+        port: options?.port || 9222,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  })
+
+  ipcMain.handle(IpcChannels.RPA_CONNECT_BROWSER, async (_, options?: RpaConnectBrowserOptions) => {
+    return await rpaLearningManager.connectBrowser(options || {})
+  })
+
+  ipcMain.handle(IpcChannels.RPA_LIST_TARGETS, async () => {
+    return await rpaLearningManager.listTargets()
+  })
+
+  ipcMain.handle(IpcChannels.RPA_START_LEARNING, async (_, options: RpaStartLearningOptions) => {
+    return await rpaLearningManager.startLearning(options)
+  })
+
+  ipcMain.handle(IpcChannels.RPA_CANCEL_LEARNING, async () => {
+    return await rpaLearningManager.cancelLearning()
+  })
+
+  ipcMain.handle(IpcChannels.RPA_GET_SESSION, async (_, sessionId: string) => {
+    return rpaLearningManager.getSession(sessionId)
+  })
+
+  ipcMain.handle(IpcChannels.RPA_GENERATE_PATCH, async (_, sessionId: string) => {
+    return await rpaLearningManager.generatePatch(sessionId)
+  })
+
+  ipcMain.handle(IpcChannels.RPA_APPLY_PATCH, async (_, sessionId: string) => {
+    return await rpaLearningManager.applyPatch(sessionId)
   })
 
   // ==================== Statistics Handlers ====================

@@ -16,6 +16,17 @@ import type {
   PromptType,
   EffectiveModel,
 } from '../shared/types'
+import type {
+  RpaBrowserConnection,
+  RpaCapturedRequest,
+  RpaConnectBrowserOptions,
+  RpaLaunchBrowserOptions,
+  RpaLearningSessionSummary,
+  RpaPatchPreview,
+  RpaProgressEvent,
+  RpaStartLearningOptions,
+  RpaTarget,
+} from '../shared/rpa'
 
 const proxyAPI = {
   start: (port?: number): Promise<boolean> => 
@@ -673,6 +684,47 @@ const toolCallingAPI = {
   },
 }
 
+const rpaAPI = {
+  launchBrowser: (options?: RpaLaunchBrowserOptions): Promise<RpaBrowserConnection> =>
+    ipcRenderer.invoke(IpcChannels.RPA_LAUNCH_BROWSER, options),
+
+  connectBrowser: (options?: RpaConnectBrowserOptions): Promise<RpaBrowserConnection> =>
+    ipcRenderer.invoke(IpcChannels.RPA_CONNECT_BROWSER, options),
+
+  listTargets: (): Promise<RpaTarget[]> =>
+    ipcRenderer.invoke(IpcChannels.RPA_LIST_TARGETS),
+
+  startLearning: (options: RpaStartLearningOptions): Promise<RpaLearningSessionSummary> =>
+    ipcRenderer.invoke(IpcChannels.RPA_START_LEARNING, options),
+
+  cancelLearning: (): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.RPA_CANCEL_LEARNING),
+
+  getSession: (sessionId: string): Promise<RpaLearningSessionSummary | undefined> =>
+    ipcRenderer.invoke(IpcChannels.RPA_GET_SESSION, sessionId),
+
+  generatePatch: (sessionId: string): Promise<RpaPatchPreview> =>
+    ipcRenderer.invoke(IpcChannels.RPA_GENERATE_PATCH, sessionId),
+
+  applyPatch: (sessionId: string): Promise<RpaPatchPreview> =>
+    ipcRenderer.invoke(IpcChannels.RPA_APPLY_PATCH, sessionId),
+
+  onProgress: (callback: (event: RpaProgressEvent) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, event: RpaProgressEvent) => callback(event)
+    ipcRenderer.on(IpcChannels.RPA_PROGRESS, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.RPA_PROGRESS, handler)
+  },
+
+  onRequestCaptured: (callback: (event: { sessionId: string; request: RpaCapturedRequest }) => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      event: { sessionId: string; request: RpaCapturedRequest },
+    ) => callback(event)
+    ipcRenderer.on(IpcChannels.RPA_REQUEST_CAPTURED, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.RPA_REQUEST_CAPTURED, handler)
+  },
+}
+
 const trayAPI = {
   openDashboard: (): void => 
     ipcRenderer.send('tray:open-dashboard'),
@@ -700,6 +752,7 @@ const electronAPI = {
   managementApi: managementApiAPI,
   contextManagement: contextManagementAPI,
   toolCalling: toolCallingAPI,
+  rpa: rpaAPI,
   tray: trayAPI,
   
   on: (channel: string, callback: (...args: unknown[]) => void) => {

@@ -14,6 +14,7 @@ import {
   Info,
   MessageSquare,
   AlertTriangle,
+  Bot,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -42,6 +43,7 @@ const navItems: NavItem[] = [
   { titleKey: 'nav.session', href: '/session', icon: MessageSquare },
   { titleKey: 'nav.apiKeys', href: '/api-keys', icon: Key },
   { titleKey: 'nav.logs', href: '/logs', icon: FileText },
+  { titleKey: 'nav.rpa', href: '/rpa', icon: Bot },
   { titleKey: 'nav.settings', href: '/settings', icon: Settings },
   { titleKey: 'nav.about', href: '/about', icon: Info },
 ]

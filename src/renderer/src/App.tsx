@@ -11,6 +11,7 @@ const ProxySettings = lazy(() => import('@/pages/ProxySettings').then(m => ({ de
 const Models = lazy(() => import('@/pages/Models').then(m => ({ default: m.Models })))
 const ApiKeys = lazy(() => import('@/pages/ApiKeys'))
 const Logs = lazy(() => import('@/pages/Logs'))
+const RpaLearning = lazy(() => import('@/pages/RpaLearning').then(m => ({ default: m.RpaLearning })))
 const Settings = lazy(() => import('@/pages/Settings').then(m => ({ default: m.Settings })))
 const About = lazy(() => import('@/pages/About').then(m => ({ default: m.About })))
 const SessionManagement = lazy(() => import('@/pages/SessionManagement').then(m => ({ default: m.SessionManagement })))
@@ -40,6 +41,7 @@ function App() {
           <Route path="/models" element={<Suspense fallback={<PageLoader />}><Models /></Suspense>} />
           <Route path="/api-keys" element={<Suspense fallback={<PageLoader />}><ApiKeys /></Suspense>} />
           <Route path="/logs" element={<Suspense fallback={<PageLoader />}><Logs /></Suspense>} />
+          <Route path="/rpa" element={<Suspense fallback={<PageLoader />}><RpaLearning /></Suspense>} />
           <Route path="/session" element={<Suspense fallback={<PageLoader />}><SessionManagement /></Suspense>} />
           <Route path="/settings" element={<Suspense fallback={<PageLoader />}><Settings /></Suspense>} />
           <Route path="/about" element={<Suspense fallback={<PageLoader />}><About /></Suspense>} />

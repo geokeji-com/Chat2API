@@ -1,3 +1,15 @@
+import type {
+  RpaBrowserConnection,
+  RpaCapturedRequest,
+  RpaConnectBrowserOptions,
+  RpaLaunchBrowserOptions,
+  RpaLearningSessionSummary,
+  RpaPatchPreview,
+  RpaProgressEvent,
+  RpaStartLearningOptions,
+  RpaTarget,
+} from '../../../shared/rpa'
+
 import type { 
   Provider, 
   Account, 
@@ -155,6 +167,19 @@ interface AccountsAPI {
     expiresAt?: number // Credit reset timestamp (milliseconds)
   } | null>
   clearChats: (accountId: string) => Promise<{ success: boolean; error?: string }>
+}
+
+interface RpaAPI {
+  launchBrowser: (options?: RpaLaunchBrowserOptions) => Promise<RpaBrowserConnection>
+  connectBrowser: (options?: RpaConnectBrowserOptions) => Promise<RpaBrowserConnection>
+  listTargets: () => Promise<RpaTarget[]>
+  startLearning: (options: RpaStartLearningOptions) => Promise<RpaLearningSessionSummary>
+  cancelLearning: () => Promise<boolean>
+  getSession: (sessionId: string) => Promise<RpaLearningSessionSummary | undefined>
+  generatePatch: (sessionId: string) => Promise<RpaPatchPreview>
+  applyPatch: (sessionId: string) => Promise<RpaPatchPreview>
+  onProgress: (callback: (event: RpaProgressEvent) => void) => () => void
+  onRequestCaptured: (callback: (event: { sessionId: string; request: RpaCapturedRequest }) => void) => () => void
 }
 
 interface OAuthAPI {
@@ -467,6 +492,7 @@ interface ElectronAPI {
   store: StoreAPI
   providers: ProvidersAPI
   accounts: AccountsAPI
+  rpa: RpaAPI
   oauth: OAuthAPI
   logs: LogsAPI
   requestLogs: RequestLogsAPI

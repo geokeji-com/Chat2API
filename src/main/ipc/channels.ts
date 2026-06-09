@@ -73,6 +73,17 @@ export const IpcChannels = {
   REQUEST_LOGS_CLEAR: 'requestLogs:clear',
   REQUEST_LOGS_NEW: 'requestLogs:new',
 
+  RPA_LAUNCH_BROWSER: 'rpa:launchBrowser',
+  RPA_CONNECT_BROWSER: 'rpa:connectBrowser',
+  RPA_LIST_TARGETS: 'rpa:listTargets',
+  RPA_START_LEARNING: 'rpa:startLearning',
+  RPA_CANCEL_LEARNING: 'rpa:cancelLearning',
+  RPA_GET_SESSION: 'rpa:getSession',
+  RPA_GENERATE_PATCH: 'rpa:generatePatch',
+  RPA_APPLY_PATCH: 'rpa:applyPatch',
+  RPA_PROGRESS: 'rpa:progress',
+  RPA_REQUEST_CAPTURED: 'rpa:requestCaptured',
+
   STATISTICS_GET: 'statistics:get',
   STATISTICS_GET_TODAY: 'statistics:getToday',
 
