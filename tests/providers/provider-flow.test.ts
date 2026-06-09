@@ -202,8 +202,14 @@ test('GLM, Kimi, and MiniMax built-in default models match current web providers
 test('Kimi K2.6 model mapping reaches the web chat request payload', () => {
   assert.deepEqual(kimiConfig.supportedModels, ['Kimi-K2.6'])
   assert.equal(kimiConfig.modelMappings?.['Kimi-K2.6'], 'kimi-k2.6')
-  assert.equal(resolveKimiScenario('kimi-k2.6'), 'SCENARIO_K2D6')
+  assert.equal(resolveKimiScenario('kimi-k2.6'), 'SCENARIO_K2D5')
   assert.equal(resolveKimiScenario('kimi-k2.5'), 'SCENARIO_K2D5')
+  assert.deepEqual(kimiConfig.credentialFields.map(field => field.name), [
+    'token',
+    'cookies',
+    'deviceId',
+    'sessionId',
+  ])
 
   const payload = createKimiChatPayload({
     model: 'kimi-k2.6',
@@ -212,15 +218,15 @@ test('Kimi K2.6 model mapping reaches the web chat request payload', () => {
     enableThinking: true,
   })
 
-  assert.equal(payload.scenario, 'SCENARIO_K2D6')
-  assert.equal(payload.message.scenario, 'SCENARIO_K2D6')
-  assert.deepEqual(payload.tools, [{ type: 'TOOL_TYPE_SEARCH', search: {} }])
+  assert.equal(payload.scenario, 'SCENARIO_K2D5')
+  assert.equal(payload.message.scenario, 'SCENARIO_K2D5')
+  assert.deepEqual(payload.tools, [{ type: 'TOOL_TYPE_SEARCH', search: { force: false }, name: '' }])
   assert.equal(payload.options.thinking, true)
 
   const frame = encodeKimiGrpcFrame(payload)
   assert.equal(frame.readUInt8(0), 0)
   assert.equal(frame.readUInt32BE(1), frame.length - 5)
-  assert.equal(JSON.parse(frame.subarray(5).toString('utf8')).scenario, 'SCENARIO_K2D6')
+  assert.equal(JSON.parse(frame.subarray(5).toString('utf8')).scenario, 'SCENARIO_K2D5')
 })
 
 test('Kimi and domestic Qwen support account-level chat cleanup', () => {
