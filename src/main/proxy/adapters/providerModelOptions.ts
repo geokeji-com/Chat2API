@@ -10,6 +10,26 @@ export interface DeepSeekChatOptions {
   thinkingEnabled: boolean
 }
 
+export type DeepSeekModelType = 'default' | 'expert' | null
+
+export interface DeepSeekCompletionPayload {
+  chat_session_id: string
+  parent_message_id: string | number | null
+  model_type: DeepSeekModelType
+  prompt: string
+  ref_file_ids: string[]
+  thinking_enabled: boolean
+  search_enabled: boolean
+  action: null
+  preempt: false
+}
+
+export function normalizeDeepSeekFollowUpPrompt(prompt: string): string {
+  return String(prompt || '')
+    .trim()
+    .replace(/^<[\|｜]User[\|｜]>\s*/i, '')
+}
+
 export function resolveDeepSeekChatOptions(
   request: DeepSeekChatOptionInput,
   _prompt: string = ''
@@ -20,12 +40,34 @@ export function resolveDeepSeekChatOptions(
   const isThinkingAlias = modelLower.includes('think')
     || modelLower.includes('r1')
     || modelLower.includes('reasoner')
+  const requestedSearch = Boolean(request.web_search) || isSearchAlias
 
   return {
     modelType: isProModel ? 'expert' : 'default',
-    searchEnabled: Boolean(request.web_search) || isSearchAlias,
+    searchEnabled: isProModel ? false : requestedSearch,
     thinkingEnabled: Boolean(request.reasoning_effort)
       || isThinkingAlias,
+  }
+}
+
+export function buildDeepSeekCompletionPayload(options: {
+  sessionId: string
+  parentMessageId: string | number | null
+  prompt: string
+  modelType: DeepSeekModelType
+  searchEnabled: boolean
+  thinkingEnabled: boolean
+}): DeepSeekCompletionPayload {
+  return {
+    chat_session_id: options.sessionId,
+    parent_message_id: options.parentMessageId,
+    model_type: options.parentMessageId === null ? options.modelType : null,
+    prompt: options.prompt,
+    ref_file_ids: [],
+    thinking_enabled: options.thinkingEnabled,
+    search_enabled: options.searchEnabled,
+    action: null,
+    preempt: false,
   }
 }
 

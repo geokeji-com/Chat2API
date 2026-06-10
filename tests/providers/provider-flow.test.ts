@@ -48,7 +48,7 @@ test('DeepSeek exposes two primary models and keeps feature aliases in default m
   )
   assert.deepEqual(
     resolveDeepSeekChatOptions({ model: 'deepseek-v4-pro-think-search' }),
-    { modelType: 'expert', searchEnabled: true, thinkingEnabled: true },
+    { modelType: 'expert', searchEnabled: false, thinkingEnabled: true },
   )
   assert.deepEqual(
     resolveDeepSeekChatOptions({ model: 'deepseek-v4-flash-search' }),
@@ -64,7 +64,7 @@ test('DeepSeek exposes two primary models and keeps feature aliases in default m
   )
   assert.deepEqual(
     resolveDeepSeekChatOptions({ model: 'deepseek-v4-pro', web_search: true, reasoning_effort: 'high' }),
-    { modelType: 'expert', searchEnabled: true, thinkingEnabled: true },
+    { modelType: 'expert', searchEnabled: false, thinkingEnabled: true },
   )
   assert.deepEqual(
     resolveDeepSeekChatOptions({ model: 'deepseek-v4-flash' }, 'please use deep thinking if helpful'),
@@ -594,7 +594,7 @@ test('DeepSeek forwarder preserves requested model aliases for response parsing 
     'utf8',
   )
 
-  assert.match(source, /new DeepSeekStreamHandler\(\s*actualModel,[\s\S]*transformed\.plan,\s*request\.model\s*\)/)
+  assert.match(source, /new DeepSeekStreamHandler\(\s*actualModel,[\s\S]*transformed\.plan,\s*request\.model,\s*\(messageId, messageIds\)/)
 })
 
 test('active source no longer exposes DS2API or DSML tool protocol markers', () => {

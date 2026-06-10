@@ -9,7 +9,12 @@
 import axios, { AxiosResponse } from 'axios'
 import { getDeepSeekHash } from '../../lib/challenge'
 import type { Account, Provider } from '../../store/types'
-import { resolveDeepSeekChatOptions } from './providerModelOptions'
+import {
+  buildDeepSeekCompletionPayload,
+  normalizeDeepSeekFollowUpPrompt,
+  resolveDeepSeekChatOptions,
+  type DeepSeekModelType,
+} from './providerModelOptions'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles'
 import { applyAxiosProxyConfig, type OutboundProxyContext } from '../proxyTransport'
 
@@ -117,6 +122,19 @@ export function buildDeepSeekShareMessageIds(
   }
 
   return uniqueMessageIds
+}
+
+function normalizeDeepSeekMessageIds(messageIds: DeepSeekMessageId[] | undefined): DeepSeekMessageId[] {
+  if (!Array.isArray(messageIds)) {
+    return []
+  }
+
+  return messageIds
+    .filter((messageId): messageId is DeepSeekMessageId =>
+      (typeof messageId === 'string' && messageId.length > 0)
+      || (typeof messageId === 'number' && Number.isFinite(messageId))
+    )
+    .filter((messageId, index, allMessageIds) => allMessageIds.indexOf(messageId) === index)
 }
 
 function generateRandomString(length: number, charset: string = 'alphanumeric'): string {
@@ -248,12 +266,13 @@ export class DeepSeekAdapter {
     return `https://chat.deepseek.com/a/chat/s/${sessionId}`
   }
 
-  private async fetchSessionMessageIds(sessionId: string, token: string): Promise<DeepSeekMessageId[]> {
+  async fetchSessionMessageIds(sessionId: string, token?: string): Promise<DeepSeekMessageId[]> {
+    const effectiveToken = token || await this.acquireToken()
     const result = await axios.get(
       `${DEEPSEEK_API_BASE}/v0/chat/history_messages?chat_session_id=${encodeURIComponent(sessionId)}`,
       {
         headers: {
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${effectiveToken}`,
           ...FAKE_HEADERS,
           Referer: this.getConversationUrl(sessionId),
         },
@@ -280,20 +299,29 @@ export class DeepSeekAdapter {
       )
   }
 
-  async createShareLink(sessionId: string, messageId?: DeepSeekMessageId): Promise<DeepSeekShareInfo> {
+  async createShareLink(
+    sessionId: string,
+    messageId?: DeepSeekMessageId,
+    preferredMessageIds?: DeepSeekMessageId[],
+  ): Promise<DeepSeekShareInfo> {
     const conversationUrl = this.getConversationUrl(sessionId)
 
     try {
       const token = await this.acquireToken()
+      const readyMessageIds = normalizeDeepSeekMessageIds(preferredMessageIds)
       let fetchedMessageIds: DeepSeekMessageId[] = []
 
-      try {
-        fetchedMessageIds = await this.fetchSessionMessageIds(sessionId, token)
-      } catch (error) {
-        console.warn('[DeepSeek] Failed to fetch session message IDs:', error)
+      if (readyMessageIds.length < 2) {
+        try {
+          fetchedMessageIds = await this.fetchSessionMessageIds(sessionId, token)
+        } catch (error) {
+          console.warn('[DeepSeek] Failed to fetch session message IDs:', error)
+        }
       }
 
-      const messageIds = buildDeepSeekShareMessageIds(fetchedMessageIds, messageId)
+      const messageIds = readyMessageIds.length >= 2
+        ? readyMessageIds
+        : buildDeepSeekShareMessageIds(fetchedMessageIds, messageId)
       if (messageIds.length === 0) {
         return {
           provider: 'deepseek',
@@ -528,25 +556,17 @@ export class DeepSeekAdapter {
     sessionId: string
     parentMessageId: DeepSeekMessageId | null
     prompt: string
-    modelType: 'default' | 'expert'
+    modelType: DeepSeekModelType
     searchEnabled: boolean
     thinkingEnabled: boolean
   }): Promise<AxiosResponse> {
     const challenge = await this.getChallenge('/api/v0/chat/completion')
     const challengeAnswer = await this.calculateChallengeAnswer(challenge)
+    const payload = buildDeepSeekCompletionPayload(options)
 
     return axios.post(
       `${DEEPSEEK_API_BASE}/v0/chat/completion`,
-      {
-        chat_session_id: options.sessionId,
-        parent_message_id: options.parentMessageId,
-        prompt: options.prompt,
-        model_type: options.modelType,
-        ref_file_ids: [],
-        search_enabled: options.searchEnabled,
-        thinking_enabled: options.thinkingEnabled,
-        preempt: false,
-      },
+      payload,
       applyAxiosProxyConfig({
         headers: {
           Authorization: `Bearer ${options.token}`,
@@ -577,7 +597,11 @@ export class DeepSeekAdapter {
     const { modelType, searchEnabled, thinkingEnabled } = resolveDeepSeekChatOptions(request, prompt)
 
     if (request.web_search || request.model.toLowerCase().includes('search')) {
-      console.log('[DeepSeek] Web search enabled')
+      if (modelType === 'expert' && !searchEnabled) {
+        console.log('[DeepSeek] Expert mode does not support web search; search_enabled is forced to false')
+      } else {
+        console.log('[DeepSeek] Web search enabled')
+      }
     }
 
     if (request.reasoning_effort || thinkingEnabled) {
@@ -599,16 +623,16 @@ export class DeepSeekAdapter {
 
   async sendFollowUp(sessionId: string, parentMessageId: DeepSeekMessageId, prompt: string, model: string): Promise<AxiosResponse> {
     const token = await this.acquireToken()
-    const { modelType } = resolveDeepSeekChatOptions({ model }, prompt)
+    const { searchEnabled, thinkingEnabled } = resolveDeepSeekChatOptions({ model }, prompt)
 
     return this.sendCompletion({
       token,
       sessionId,
       parentMessageId,
-      prompt: `<｜User｜>${prompt}`,
-      modelType,
-      searchEnabled: false,
-      thinkingEnabled: false,
+      prompt: normalizeDeepSeekFollowUpPrompt(prompt),
+      modelType: null,
+      searchEnabled,
+      thinkingEnabled,
     })
   }
 

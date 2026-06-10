@@ -32,6 +32,31 @@ function hasMessageId(messageId: DeepSeekMessageId | undefined): messageId is De
     || (typeof messageId === 'number' && Number.isFinite(messageId))
 }
 
+function sameMessageId(left: DeepSeekMessageId | undefined, right: DeepSeekMessageId | undefined): boolean {
+  if (!hasMessageId(left) || !hasMessageId(right)) {
+    return false
+  }
+  return String(left) === String(right)
+}
+
+export function pickDeepSeekFollowUpResponseMessageId(
+  messageIds: DeepSeekMessageId[],
+  parentMessageId: DeepSeekMessageId
+): DeepSeekMessageId | undefined {
+  const normalizedMessageIds = messageIds
+    .filter(hasMessageId)
+    .filter((messageId, index, allMessageIds) =>
+      allMessageIds.findIndex(candidate => sameMessageId(candidate, messageId)) === index
+    )
+  const parentIndex = normalizedMessageIds.findIndex(messageId => sameMessageId(messageId, parentMessageId))
+  const candidates = parentIndex >= 0
+    ? normalizedMessageIds.slice(parentIndex + 1)
+    : normalizedMessageIds
+  const latestMessageId = candidates[candidates.length - 1]
+
+  return sameMessageId(latestMessageId, parentMessageId) ? undefined : latestMessageId
+}
+
 export function createDeepSeekPostShareFollowUpPlan(options: {
   config: DeepSeekPostShareFollowUpConfig
   shareInfo: DeepSeekShareInfo | undefined

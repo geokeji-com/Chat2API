@@ -4,7 +4,7 @@ import type { ChatCompletionRequest, ChatCompletionResponse, ToolCall } from './
 type Usage = NonNullable<ChatCompletionResponse['usage']> & Record<string, any>
 
 const STANDARD_CHUNK_KEYS = new Set(['id', 'object', 'created', 'model', 'choices', 'usage'])
-const MESSAGE_EXTRA_KEYS = new Set(['citations', 'search_results', 'related_searches'])
+const MESSAGE_EXTRA_KEYS = new Set(['citations', 'search_results', 'search_queries', 'related_searches'])
 
 export interface FinalResponseTransformOptions {
   model: string

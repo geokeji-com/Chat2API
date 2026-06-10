@@ -155,8 +155,9 @@ export interface ChatCompletionChoice {
     reasoning_content?: string
     tool_calls?: ToolCall[]
     citations?: any[]
+    search_queries?: string[]
     search_results?: any
-    related_searches?: any[]
+    related_searches?: any[] | string
   }
   delta?: {
     role?: 'assistant'

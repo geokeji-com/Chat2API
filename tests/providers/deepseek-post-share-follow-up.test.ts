@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   createDeepSeekPostShareFollowUpPlan,
   executeDeepSeekPostShareFollowUps,
+  pickDeepSeekFollowUpResponseMessageId,
   resolveDeepSeekPostShareFollowUpConfig,
 } from '../../src/main/proxy/services/deepseekPostShareFollowUp.ts'
 import {
@@ -187,6 +188,21 @@ test('DeepSeek post-share follow-ups use chained parent message IDs', async () =
       model: 'deepseek-v4-flash',
     },
   ])
+})
+
+test('DeepSeek follow-up response message ID can be recovered from session history', () => {
+  assert.equal(
+    pickDeepSeekFollowUpResponseMessageId([1, 2, 3, 4], 2),
+    4,
+  )
+  assert.equal(
+    pickDeepSeekFollowUpResponseMessageId(['1', '2', '3', '4'], 2),
+    '4',
+  )
+  assert.equal(
+    pickDeepSeekFollowUpResponseMessageId([1, 2], 2),
+    undefined,
+  )
 })
 
 test('DeepSeek post-share follow-up planning does not mutate shared message IDs', () => {

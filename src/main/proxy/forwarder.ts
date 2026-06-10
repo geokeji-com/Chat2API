@@ -33,6 +33,7 @@ import {
 import {
   createDeepSeekPostShareFollowUpPlan,
   executeDeepSeekPostShareFollowUps,
+  pickDeepSeekFollowUpResponseMessageId,
   resolveDeepSeekPostShareFollowUpConfig,
 } from './services/deepseekPostShareFollowUp'
 import {
@@ -234,7 +235,21 @@ export class RequestForwarder {
               model,
             )
             await handler.handleNonStream(response.data)
-            return handler.getLastMessageId()
+            const responseMessageId = handler.getLastMessageId()
+            if (responseMessageId !== undefined) {
+              return responseMessageId
+            }
+
+            const messageIds = await options.adapter.fetchSessionMessageIds(sessionId)
+            const fallbackMessageId = pickDeepSeekFollowUpResponseMessageId(messageIds, parentMessageId)
+            if (fallbackMessageId !== undefined) {
+              console.warn('[DeepSeek] Follow-up message ID recovered from history:', {
+                sessionId,
+                parentMessageId,
+                fallbackMessageId,
+              })
+            }
+            return fallbackMessageId
           },
         })
       } catch (error) {
@@ -639,7 +654,7 @@ export class RequestForwarder {
         transformedRequest.reasoning_effort,
         transformed.plan,
         request.model,
-        (messageId) => adapter.createShareLink(sessionId, messageId)
+        (messageId, messageIds) => adapter.createShareLink(sessionId, messageId, messageIds)
       )
       
       if (request.stream) {

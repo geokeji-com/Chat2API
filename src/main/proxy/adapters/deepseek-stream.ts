@@ -28,7 +28,8 @@ function formatInlineCitationMarkers(content: string, enabled: boolean, preserve
 interface StreamChunk {
   p?: string
   v?: any
-  response_message_id?: string
+  request_message_id?: DeepSeekMessageId
+  response_message_id?: DeepSeekMessageId
   o?: string
 }
 
@@ -39,6 +40,17 @@ interface DeepSeekCitation {
   url: string
   [key: string]: any
 }
+
+const RELATED_SEARCH_KEYS = [
+  'related_searches',
+  'relatedSearches',
+  'related_questions',
+  'relatedQuestions',
+  'suggested_questions',
+  'suggestedQuestions',
+  'follow_up_questions',
+  'followUpQuestions',
+]
 
 function createBaseChunk(id: string, model: string, created: number) {
   return {
@@ -53,9 +65,12 @@ export class DeepSeekStreamHandler {
   private model: string
   private sessionId: string
   private isFirstChunk: boolean = true
+  private requestMessageId: DeepSeekMessageId | undefined
   private messageId: DeepSeekMessageId | undefined
   private currentPath: string = ''
   private searchResults: any[] = []
+  private searchQueries: string[] = []
+  private relatedSearches: string[] = []
   private thinkingStarted: boolean = false
   private accumulatedTokenUsage: number = 2
   private created: number
@@ -67,7 +82,10 @@ export class DeepSeekStreamHandler {
   private isDone: boolean = false
   private semanticModel: string
   private shareInfo?: DeepSeekShareInfo
-  private shareInfoProvider?: (messageId: DeepSeekMessageId | undefined) => Promise<DeepSeekShareInfo | undefined>
+  private shareInfoProvider?: (
+    messageId: DeepSeekMessageId | undefined,
+    messageIds: DeepSeekMessageId[] | undefined,
+  ) => Promise<DeepSeekShareInfo | undefined>
 
   constructor(
     model: string,
@@ -77,7 +95,10 @@ export class DeepSeekStreamHandler {
     reasoningEffort?: string,
     toolCallingPlan?: ToolCallingPlan,
     semanticModel?: string,
-    shareInfoProvider?: (messageId: DeepSeekMessageId | undefined) => Promise<DeepSeekShareInfo | undefined>
+    shareInfoProvider?: (
+      messageId: DeepSeekMessageId | undefined,
+      messageIds: DeepSeekMessageId[] | undefined,
+    ) => Promise<DeepSeekShareInfo | undefined>
   ) {
     this.model = model
     this.semanticModel = (semanticModel || model).toLowerCase()
@@ -95,11 +116,19 @@ export class DeepSeekStreamHandler {
     return this.messageId
   }
 
+  getShareMessageIds(): DeepSeekMessageId[] | undefined {
+    if (this.requestMessageId === undefined || this.messageId === undefined) {
+      return undefined
+    }
+
+    return [this.requestMessageId, this.messageId]
+  }
+
   private async attachShareInfo(): Promise<void> {
     if (!this.shareInfoProvider) return
 
     try {
-      const shareInfo = await this.shareInfoProvider(this.messageId)
+      const shareInfo = await this.shareInfoProvider(this.messageId, this.getShareMessageIds())
       if (shareInfo) {
         this.shareInfo = shareInfo
       }
@@ -207,6 +236,79 @@ export class DeepSeekStreamHandler {
       }))
   }
 
+  private static mergeTextValuesInto(target: string[], values: unknown): void {
+    const entries = Array.isArray(values) ? values : [values]
+    for (const entry of entries) {
+      const text = DeepSeekStreamHandler.extractTextValue(entry)
+      if (!text || target.includes(text)) {
+        continue
+      }
+      target.push(text)
+    }
+  }
+
+  private static extractTextValue(value: unknown): string | undefined {
+    if (typeof value === 'string') {
+      const text = value.trim()
+      return text || undefined
+    }
+    if (!value || typeof value !== 'object') {
+      return undefined
+    }
+
+    const record = value as Record<string, unknown>
+    for (const key of ['query', 'question', 'text', 'content', 'title']) {
+      const text = typeof record[key] === 'string' ? record[key].trim() : ''
+      if (text) {
+        return text
+      }
+    }
+    return undefined
+  }
+
+  private static collectFragmentMetadata(
+    fragment: any,
+    searchQueries: string[],
+    relatedSearches: string[],
+  ): void {
+    if (!fragment || typeof fragment !== 'object') {
+      return
+    }
+
+    if (Array.isArray(fragment.queries)) {
+      DeepSeekStreamHandler.mergeTextValuesInto(searchQueries, fragment.queries)
+    }
+
+    for (const key of RELATED_SEARCH_KEYS) {
+      if (fragment[key] !== undefined) {
+        DeepSeekStreamHandler.mergeTextValuesInto(relatedSearches, fragment[key])
+      }
+    }
+  }
+
+  private static collectChunkMetadata(
+    chunk: StreamChunk,
+    searchQueries: string[],
+    relatedSearches: string[],
+  ): void {
+    const path = chunk.p || ''
+    if (/queries$|search_queries|search\/queries/i.test(path)) {
+      DeepSeekStreamHandler.mergeTextValuesInto(searchQueries, chunk.v)
+    }
+    if (RELATED_SEARCH_KEYS.some(key => path.toLowerCase().includes(key.toLowerCase()))) {
+      DeepSeekStreamHandler.mergeTextValuesInto(relatedSearches, chunk.v)
+    }
+
+    if (chunk.v && typeof chunk.v === 'object' && chunk.v.response) {
+      const response = chunk.v.response
+      for (const key of RELATED_SEARCH_KEYS) {
+        if (response[key] !== undefined) {
+          DeepSeekStreamHandler.mergeTextValuesInto(relatedSearches, response[key])
+        }
+      }
+    }
+  }
+
   private parseSSE(data: string): StreamChunk | null {
     try {
       return JSON.parse(data)
@@ -222,7 +324,9 @@ export class DeepSeekStreamHandler {
   private createChunk(
     delta: { role?: string; content?: string; reasoning_content?: string; tool_calls?: any[] },
     finishReason?: string,
-    citations: DeepSeekCitation[] = []
+    citations: DeepSeekCitation[] = [],
+    searchQueries: string[] = [],
+    relatedSearches: string[] = [],
   ): string {
     const chunk: any = {
       id: `${this.sessionId}@${this.messageId ?? ''}`,
@@ -242,6 +346,14 @@ export class DeepSeekStreamHandler {
 
     if (finishReason && citations.length > 0) {
       chunk.citations = citations
+    }
+
+    if (finishReason && searchQueries.length > 0) {
+      chunk.search_queries = searchQueries
+    }
+
+    if (finishReason && relatedSearches.length > 0) {
+      chunk.related_searches = relatedSearches
     }
 
     return `data: ${JSON.stringify(chunk)}\n\n`
@@ -296,19 +408,33 @@ export class DeepSeekStreamHandler {
     isFoldModel: boolean,
     isSearchSilentModel: boolean
   ): void {
-    if (chunk.response_message_id && !this.messageId) {
+    if (chunk.request_message_id !== undefined && this.requestMessageId === undefined) {
+      this.requestMessageId = chunk.request_message_id
+    }
+
+    if (chunk.response_message_id !== undefined && this.messageId === undefined) {
       this.messageId = chunk.response_message_id
     }
 
     const previousPath = this.currentPath
 
+    DeepSeekStreamHandler.collectChunkMetadata(chunk, this.searchQueries, this.relatedSearches)
+
     if (chunk.v && typeof chunk.v === 'object' && chunk.v.response) {
       const isThinkingNow = chunk.v.response.thinking_enabled
       this.currentPath = isThinkingNow ? 'thinking' : 'content'
+      if (chunk.v.response.parent_id !== undefined && this.requestMessageId === undefined) {
+        this.requestMessageId = chunk.v.response.parent_id
+      }
+      if (chunk.v.response.message_id !== undefined && this.messageId === undefined) {
+        this.messageId = chunk.v.response.message_id
+      }
       
       const fragments = chunk.v.response.fragments
       if (Array.isArray(fragments) && fragments.length > 0) {
         for (const fragment of fragments) {
+          DeepSeekStreamHandler.collectFragmentMetadata(fragment, this.searchQueries, this.relatedSearches)
+
           if (Array.isArray(fragment.results)) {
             DeepSeekStreamHandler.mergeSearchResultsInto(this.searchResults, fragment.results)
           }
@@ -328,6 +454,8 @@ export class DeepSeekStreamHandler {
     } else if (chunk.p === 'response/fragments') {
       if (Array.isArray(chunk.v)) {
         for (const fragment of chunk.v) {
+          DeepSeekStreamHandler.collectFragmentMetadata(fragment, this.searchQueries, this.relatedSearches)
+
           if (fragment.content) {
             const fragmentType = fragment.type
             const fragmentContent = fragment.content
@@ -502,7 +630,7 @@ export class DeepSeekStreamHandler {
     // Determine finish_reason based on whether we had tool calls
     const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
 
-    transStream.write(this.createChunk({}, finishReason, citations))
+    transStream.write(this.createChunk({}, finishReason, citations, this.searchQueries, this.relatedSearches))
     transStream.write('data: [DONE]\n\n')
     transStream.end()
     
@@ -517,6 +645,8 @@ export class DeepSeekStreamHandler {
     let currentPath = ''
     let accumulatedTokenUsage = 2
     const searchResults: any[] = []
+    const searchQueries: string[] = []
+    const relatedSearches: string[] = []
     const isThinkingModel = this.isThinkingModel()
     const isFoldModel = this.isFoldModel(isThinkingModel)
     const isSearchSilentModel = this.isSearchSilentModel()
@@ -544,20 +674,35 @@ export class DeepSeekStreamHandler {
           try {
             const parsed = JSON.parse(data)
             
-            if (parsed.response_message_id && !messageId) {
+            if (parsed.request_message_id !== undefined && this.requestMessageId === undefined) {
+              this.requestMessageId = parsed.request_message_id
+            }
+
+            if (parsed.response_message_id !== undefined && !messageId) {
               messageId = parsed.response_message_id
               this.messageId = parsed.response_message_id
             }
+
+            DeepSeekStreamHandler.collectChunkMetadata(parsed, searchQueries, relatedSearches)
 
             if (parsed.v && typeof parsed.v === 'object' && parsed.v.response) {
               const isThinkingNow = parsed.v.response.thinking_enabled
               if (isThinkingNow !== undefined) {
                 currentPath = isThinkingNow ? 'thinking' : 'content'
               }
+              if (parsed.v.response.parent_id !== undefined && this.requestMessageId === undefined) {
+                this.requestMessageId = parsed.v.response.parent_id
+              }
+              if (parsed.v.response.message_id !== undefined && !messageId) {
+                messageId = parsed.v.response.message_id
+                this.messageId = parsed.v.response.message_id
+              }
               
               const fragments = parsed.v.response.fragments
               if (Array.isArray(fragments) && fragments.length > 0) {
                 for (const fragment of fragments) {
+                  DeepSeekStreamHandler.collectFragmentMetadata(fragment, searchQueries, relatedSearches)
+
                   if (Array.isArray(fragment.results)) {
                     DeepSeekStreamHandler.mergeSearchResultsInto(searchResults, fragment.results)
                   }
@@ -581,6 +726,8 @@ export class DeepSeekStreamHandler {
             } else if (parsed.p === 'response/fragments') {
               if (Array.isArray(parsed.v)) {
                 for (const fragment of parsed.v) {
+                  DeepSeekStreamHandler.collectFragmentMetadata(fragment, searchQueries, relatedSearches)
+
                   if (fragment.content) {
                     let cleanedFragment = fragment.content.replace(/FINISHED/g, '')
                     cleanedFragment = stripSearchControlMarker(cleanedFragment, shouldStripSearchControlMarker)
@@ -694,6 +841,14 @@ export class DeepSeekStreamHandler {
 
         if (citations.length > 0) {
           message.citations = citations
+        }
+
+        if (searchQueries.length > 0) {
+          message.search_queries = searchQueries
+        }
+
+        if (relatedSearches.length > 0) {
+          message.related_searches = relatedSearches
         }
 
         // Log for debugging

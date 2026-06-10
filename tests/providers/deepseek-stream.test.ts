@@ -4,6 +4,10 @@ import { Readable } from 'node:stream'
 import { readFileSync } from 'node:fs'
 
 import { DeepSeekStreamHandler } from '../../src/main/proxy/adapters/deepseek-stream.ts'
+import {
+  buildDeepSeekCompletionPayload,
+  normalizeDeepSeekFollowUpPrompt,
+} from '../../src/main/proxy/adapters/providerModelOptions.ts'
 
 function sse(events: unknown[]): Readable {
   return Readable.from(events.map(event => `data: ${JSON.stringify(event)}\n\n`))
@@ -332,12 +336,206 @@ test('DeepSeek stream attaches share metadata to final chunk before DONE', async
   assert.equal(finalChunk.chat2api.share_url, 'https://chat.deepseek.com/share/share-stream')
 })
 
+test('DeepSeek stream prefers ready message ID pair for share metadata', async () => {
+  let receivedMessageId: unknown
+  let receivedMessageIds: unknown
+  const handler = new DeepSeekStreamHandler(
+    'deepseek-v4-flash',
+    'session-ready-share',
+    undefined,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    async (messageId, messageIds) => {
+      receivedMessageId = messageId
+      receivedMessageIds = messageIds
+      return {
+        provider: 'deepseek',
+        session_id: 'session-ready-share',
+        message_id: messageId,
+        message_ids: messageIds,
+        conversation_url: 'https://chat.deepseek.com/a/chat/s/session-ready-share',
+        share_id: 'share-ready',
+        share_url: 'https://chat.deepseek.com/share/share-ready',
+      }
+    },
+  )
+  const source = sse([
+    { request_message_id: 1, response_message_id: 2, model_type: 'default' },
+    { p: 'response/fragments', o: 'APPEND', v: [{ id: 3, type: 'RESPONSE', content: 'ready 分享。' }] },
+  ])
+
+  const output = await collect(await handler.handleStream(source))
+  const events = output.join('').split('\n\n').filter(Boolean)
+  const doneIndex = events.findIndex(event => event === 'data: [DONE]')
+  const finalChunk = JSON.parse(events[doneIndex - 1].slice('data: '.length))
+
+  assert.equal(receivedMessageId, 2)
+  assert.deepEqual(receivedMessageIds, [1, 2])
+  assert.deepEqual(handler.getShareMessageIds(), [1, 2])
+  assert.deepEqual(finalChunk.chat2api.message_ids, [1, 2])
+  assert.equal(finalChunk.chat2api.share_url, 'https://chat.deepseek.com/share/share-ready')
+})
+
 test('DeepSeek share message IDs include user-assistant pairs when only assistant ID is known', () => {
   const source = readFileSync('src/main/proxy/adapters/deepseek.ts', 'utf8')
 
   assert.match(source, /buildDeepSeekShareMessageIds/)
   assert.match(source, /numericMessageId\s*-\s*1/)
   assert.match(source, /return \[numericMessageId - 1, numericMessageId\]/)
+})
+
+test('DeepSeek completion payload matches web request shape and nulls model type for follow-ups', () => {
+  assert.deepEqual(buildDeepSeekCompletionPayload({
+    sessionId: 'session-first',
+    parentMessageId: null,
+    prompt: '首问',
+    modelType: 'expert',
+    searchEnabled: false,
+    thinkingEnabled: true,
+  }), {
+    chat_session_id: 'session-first',
+    parent_message_id: null,
+    model_type: 'expert',
+    prompt: '首问',
+    ref_file_ids: [],
+    thinking_enabled: true,
+    search_enabled: false,
+    action: null,
+    preempt: false,
+  })
+
+  assert.deepEqual(buildDeepSeekCompletionPayload({
+    sessionId: 'session-follow-up',
+    parentMessageId: 6,
+    prompt: '继续',
+    modelType: 'expert',
+    searchEnabled: true,
+    thinkingEnabled: false,
+  }), {
+    chat_session_id: 'session-follow-up',
+    parent_message_id: 6,
+    model_type: null,
+    prompt: '继续',
+    ref_file_ids: [],
+    thinking_enabled: false,
+    search_enabled: true,
+    action: null,
+    preempt: false,
+  })
+})
+
+test('DeepSeek follow-up prompts do not include synthetic speaker prefixes', () => {
+  assert.equal(normalizeDeepSeekFollowUpPrompt('展开说说'), '展开说说')
+  assert.equal(normalizeDeepSeekFollowUpPrompt('<｜User｜>展开说说'), '展开说说')
+  assert.equal(normalizeDeepSeekFollowUpPrompt('<|User|>展开说说'), '展开说说')
+})
+
+test('DeepSeek stream ignores expert TIP fragments and routes thinking separately', async () => {
+  const handler = new DeepSeekStreamHandler('deepseek-v4-pro-think', 'session-tip', undefined, false)
+  const source = sse([
+    { request_message_id: 1, response_message_id: 2, model_type: 'expert' },
+    {
+      v: {
+        response: {
+          parent_id: 1,
+          message_id: 2,
+          thinking_enabled: true,
+          fragments: [
+            {
+              id: 2,
+              type: 'TIP',
+              content: '专家模式暂不支持搜索，请使用快速模式',
+            },
+            {
+              id: 3,
+              type: 'THINK',
+              content: '先分析需求。',
+            },
+          ],
+        },
+      },
+    },
+    { p: 'response/fragments', o: 'APPEND', v: [{ id: 4, type: 'ANSWER', content: '推荐选一级能效空调。' }] },
+  ])
+
+  const output = await collect(await handler.handleStream(source))
+  const joined = output.join('')
+
+  assert.match(joined, /"reasoning_content":"先分析需求。"/)
+  assert.match(joined, /"content":"推荐选一级能效空调。"/)
+  assert.doesNotMatch(joined, /专家模式暂不支持搜索/)
+})
+
+test('DeepSeek non-stream ignores search control fragments and keeps answer content', async () => {
+  const handler = new DeepSeekStreamHandler('deepseek-v4-flash-search', 'session-tool-search', undefined, true)
+  const source = sse([
+    {
+      v: {
+        response: {
+          thinking_enabled: false,
+          search_enabled: true,
+          fragments: [{
+            id: 2,
+            type: 'TOOL_SEARCH',
+            content: null,
+            queries: [{ query: 'GEO 优化公司' }],
+            related_searches: [{ question: 'GEO 优化怎么做？' }],
+            results: [],
+          }],
+        },
+      },
+    },
+    { p: 'response/fragments/-1/results', v: [{
+      url: 'https://example.com/geo',
+      title: 'GEO 样例',
+      cite_index: 1,
+    }] },
+    { p: 'response/fragments', o: 'APPEND', v: [{ id: 3, type: 'RESPONSE', content: '可以重点看技术能力[citation:1]。' }] },
+  ])
+
+  const response: any = await handler.handleNonStream(source)
+
+  assert.equal(response.choices[0].message.content, '可以重点看技术能力[citation:1]。')
+  assert.equal(response.choices[0].message.citations[0].title, 'GEO 样例')
+  assert.deepEqual(response.choices[0].message.search_queries, ['GEO 优化公司'])
+  assert.deepEqual(response.choices[0].message.related_searches, ['GEO 优化怎么做？'])
+})
+
+test('DeepSeek stream final chunk exposes TOOL_SEARCH queries and related searches', async () => {
+  const handler = new DeepSeekStreamHandler('deepseek-v4-flash-search', 'session-query-stream', undefined, true)
+  const source = sse([
+    {
+      v: {
+        response: {
+          thinking_enabled: false,
+          fragments: [{
+            id: 1,
+            type: 'TOOL_SEARCH',
+            content: null,
+            queries: [{ query: '户外防晒推荐' }, { query: '夏天防晒衣' }],
+          }],
+        },
+      },
+    },
+    {
+      p: 'response/related_searches',
+      v: [
+        { question: '夏天户外怎么补防晒？' },
+        { question: '防晒衣 UPF 怎么选？' },
+      ],
+    },
+    { p: 'response/fragments', o: 'APPEND', v: [{ id: 2, type: 'RESPONSE', content: '建议软硬防晒结合。' }] },
+  ])
+
+  const output = await collect(await handler.handleStream(source))
+  const events = output.join('').split('\n\n').filter(Boolean)
+  const doneIndex = events.findIndex(event => event === 'data: [DONE]')
+  const finalChunk = JSON.parse(events[doneIndex - 1].slice('data: '.length))
+
+  assert.deepEqual(finalChunk.search_queries, ['户外防晒推荐', '夏天防晒衣'])
+  assert.deepEqual(finalChunk.related_searches, ['夏天户外怎么补防晒？', '防晒衣 UPF 怎么选？'])
 })
 
 test('DeepSeek stream handler uses requested alias semantics when actual model is primary', async () => {
