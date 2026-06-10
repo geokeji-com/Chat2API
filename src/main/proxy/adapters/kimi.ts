@@ -6,7 +6,7 @@
 import axios, { AxiosResponse } from 'axios'
 import { Account, Provider } from '../../store/types'
 import { PassThrough } from 'stream'
-import { createHash } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected } from '../utils/tools'
 import { parseToolCallsFromText } from '../utils/toolParser'
 import { createBaseChunk } from '../utils/streamToolHandler'
@@ -36,6 +36,8 @@ const FAKE_HEADERS: Record<string, string> = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
   Priority: 'u=1, i',
   'X-Msh-Platform': 'web',
+  'X-Msh-Version': '1.0.0',
+  'X-Language': 'zh-CN',
 }
 
 interface TokenInfo {
@@ -118,6 +120,10 @@ function normalizeCookieHeader(rawCookie: string | undefined, authToken: string)
 
 function unixTimestamp(): number {
   return Math.floor(Date.now() / 1000)
+}
+
+function createTrafficId(): string {
+  return randomBytes(10).toString('hex')
 }
 
 export function detectTokenType(token: string): 'jwt' | 'refresh' {
@@ -215,6 +221,7 @@ export class KimiAdapter {
       'Connect-Protocol-Version': '1',
       'X-Msh-Device-Id': this.getDeviceId(accessToken),
       'X-Msh-Session-Id': this.getSessionId(accessToken),
+      'X-Traffic-Id': createTrafficId(),
       ...(cookie ? { Cookie: cookie } : {}),
     }
   }
@@ -467,16 +474,19 @@ export class KimiAdapter {
   async createShareLink(
     chatId: string | undefined,
     messageId?: string,
+    messageIds: string[] = [],
     metadata: Pick<KimiChat2ApiInfo, 'citations' | 'search_results'> = {}
   ): Promise<KimiChat2ApiInfo | undefined> {
     if (!chatId) {
       return undefined
     }
 
+    const normalizedMessageIds = uniqueStrings([messageId, ...messageIds])
     const baseInfo: KimiChat2ApiInfo = {
       provider: 'kimi',
       chat_id: chatId,
-      ...(messageId ? { message_id: messageId, message_ids: [messageId] } : {}),
+      ...(messageId ? { message_id: messageId } : {}),
+      ...(normalizedMessageIds.length > 0 ? { message_ids: normalizedMessageIds } : {}),
       conversation_url: this.getConversationUrl(chatId),
       ...metadata,
     }
@@ -486,11 +496,14 @@ export class KimiAdapter {
       const response = await axios.post(
         `${KIMI_API_BASE}/apiv2/kimi.gateway.chat.v1.ChatService/CreateChatShare`,
         {
-          chatId,
-          messageIds: messageId ? [messageId] : [],
+          chat_id: chatId,
+          message_ids: normalizedMessageIds,
         },
         applyAxiosProxyConfig({
-          headers: this.buildWebHeaders(accessToken, 'application/json'),
+          headers: {
+            ...this.buildWebHeaders(accessToken, 'application/json'),
+            Referer: `${this.getConversationUrl(chatId)}?chat_enter_method=new_chat`,
+          },
           timeout: 15000,
           validateStatus: () => true,
         }, this.outboundProxy)
@@ -688,6 +701,7 @@ export interface KimiChat2ApiInfo {
 export interface KimiCompletionMetadataContext {
   chat_id?: string
   message_id?: string
+  message_ids?: string[]
   citations: KimiCitation[]
   search_results?: KimiSearchSummary
 }
@@ -706,6 +720,21 @@ function pickString(...values: any[]): string | undefined {
   return undefined
 }
 
+function uniqueStrings(values: Array<string | undefined | null>): string[] {
+  return values.reduce<string[]>((acc, value) => {
+    if (typeof value !== 'string') {
+      return acc
+    }
+
+    const normalized = value.trim()
+    if (!normalized || acc.includes(normalized)) {
+      return acc
+    }
+
+    return [...acc, normalized]
+  }, [])
+}
+
 function pickPositiveInteger(...values: any[]): number | undefined {
   for (const value of values) {
     if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
@@ -715,6 +744,24 @@ function pickPositiveInteger(...values: any[]): number | undefined {
       return Number(value)
     }
   }
+  return undefined
+}
+
+function pickRefIndex(...values: any[]): number | undefined {
+  for (const value of values) {
+    if (typeof value !== 'string') continue
+
+    const direct = value.match(/^\d+$/)
+    if (direct && Number(direct[0]) > 0) {
+      return Number(direct[0])
+    }
+
+    const ref = value.match(/#(\d+)$/)
+    if (ref) {
+      return Number(ref[1]) + 1
+    }
+  }
+
   return undefined
 }
 
@@ -732,7 +779,13 @@ function normalizeKimiSearchResult(raw: any, fallbackIndex: number): KimiCitatio
   const contentValue = raw.content?.case === 'search'
     ? raw.content.value
     : raw.content?.value
-  const source = contentValue || raw.search || raw.value || raw
+  const source = contentValue
+    || raw.searchResult
+    || raw.search_result
+    || raw.result
+    || raw.search
+    || raw.value
+    || raw
   const base = source.base || source.page || source.webPage || source.web_page || source
   const url = pickString(
     source.url,
@@ -752,17 +805,19 @@ function normalizeKimiSearchResult(raw: any, fallbackIndex: number): KimiCitatio
   }
 
   const index = pickPositiveInteger(
+    source.id,
     source.index,
     source.cite_index,
     source.citeIndex,
     source.ref_index,
     source.refIndex,
+    base.id,
     base.index,
     base.cite_index,
     base.citeIndex,
     base.ref_index,
     base.refIndex
-  ) || fallbackIndex
+  ) || pickRefIndex(source.refIndex, source.ref_index, base.refIndex, base.ref_index, raw.refIndex, raw.ref_index) || fallbackIndex
 
   const title = pickString(source.title, source.name, base.title, base.name, base.siteName, base.site_name) || url
   const snippet = pickString(source.snippet, source.summary, source.content, base.snippet, base.summary, base.content)
@@ -787,11 +842,13 @@ export class KimiStreamHandler {
   private toolCallingPlan?: ToolCallingPlan
   private realChatId: string | null = null
   private lastMessageId: string | null = null
+  private userMessageId: string | null = null
   private hasError: boolean = false
   private currentPhase: 'thinking' | 'answer' | undefined = undefined
   private reasoningBuffer: string = ''
   private searchKeywords: string[] = []
   private searchResults: KimiCitation[] = []
+  private toolArgsById: Record<string, string> = {}
   private chat2api?: KimiChat2ApiInfo
   private metadataProvider?: (context: KimiCompletionMetadataContext) => Promise<KimiChat2ApiInfo | undefined>
   private isDone: boolean = false
@@ -827,6 +884,14 @@ export class KimiStreamHandler {
 
   getLastMessageId(): string | null {
     return this.lastMessageId
+  }
+
+  getUserMessageId(): string | null {
+    return this.userMessageId
+  }
+
+  getMessageIds(): string[] {
+    return uniqueStrings([this.lastMessageId, this.userMessageId])
   }
 
   hasSessionError(): boolean {
@@ -921,8 +986,56 @@ export class KimiStreamHandler {
     }
   }
 
-  private collectSearchBlock(block: any): void {
+  private collectToolArgs(block: any, op?: string, mask?: string): void {
+    const args = block?.tool?.args
+    if (typeof args !== 'string' || !args) {
+      return
+    }
+
+    const toolKey = pickString(block.tool?.toolCallId, block.id, block.messageId) || 'default'
+    const previousArgs = this.toolArgsById[toolKey] || ''
+    const nextArgs = op === 'append' || mask?.includes('block.tool.args')
+      ? `${previousArgs}${args}`
+      : args
+
+    this.toolArgsById = {
+      ...this.toolArgsById,
+      [toolKey]: nextArgs,
+    }
+
+    try {
+      const parsed = JSON.parse(nextArgs)
+      this.addSearchKeywords(parsed.queries ?? parsed.query ?? parsed.keywords ?? parsed.keyword)
+    } catch {
+      // Tool args arrive incrementally; ignore until a complete JSON object is available.
+    }
+  }
+
+  private collectToolContents(contents: any): void {
+    for (const item of asArray(contents)) {
+      this.addSearchResults(
+        item?.searchResult
+        ?? item?.search_result
+        ?? item?.result
+        ?? item?.search
+        ?? item
+      )
+    }
+  }
+
+  private collectToolArtifacts(block: any, op?: string, mask?: string): void {
+    if (!block?.tool || typeof block.tool !== 'object') {
+      return
+    }
+
+    this.collectToolArgs(block, op, mask)
+    this.collectToolContents(block.tool.contents ?? block.tool.content)
+  }
+
+  private collectSearchBlock(block: any, op?: string, mask?: string): void {
     if (!block || typeof block !== 'object') return
+
+    this.collectToolArtifacts(block, op, mask)
 
     const search = block.content?.case === 'search'
       ? block.content.value
@@ -961,7 +1074,7 @@ export class KimiStreamHandler {
   }
 
   private collectSearchArtifacts(data: any): void {
-    this.collectSearchBlock(data.block)
+    this.collectSearchBlock(data.block, data.op, data.mask)
 
     if (data.event?.value) {
       this.collectSearchBlock(data.event.value)
@@ -1011,6 +1124,7 @@ export class KimiStreamHandler {
       const metadata = await this.metadataProvider({
         chat_id: this.getConversationId() || undefined,
         message_id: this.lastMessageId || undefined,
+        message_ids: this.getMessageIds(),
         citations: this.createCitationList(),
         search_results: this.createSearchSummary(),
       })
@@ -1126,6 +1240,11 @@ export class KimiStreamHandler {
     if (data.message?.id && data.message?.role === 'assistant' && !this.lastMessageId) {
       this.lastMessageId = data.message.id
       console.log('[Kimi] Extracted assistant message id:', this.lastMessageId)
+    }
+
+    if (data.message?.id && data.message?.role === 'user' && !this.userMessageId) {
+      this.userMessageId = data.message.id
+      console.log('[Kimi] Extracted user message id:', this.userMessageId)
     }
 
     const multiStagePhase = this.detectMultiStage(data)
@@ -1359,6 +1478,11 @@ export class KimiStreamHandler {
               if (data.message?.id && data.message?.role === 'assistant' && !this.lastMessageId) {
                 this.lastMessageId = data.message.id
                 console.log('[Kimi] Non-stream: Extracted assistant message id:', this.lastMessageId)
+              }
+
+              if (data.message?.id && data.message?.role === 'user' && !this.userMessageId) {
+                this.userMessageId = data.message.id
+                console.log('[Kimi] Non-stream: Extracted user message id:', this.userMessageId)
               }
 
               const multiStagePhase = this.detectMultiStage(data)

@@ -861,6 +861,7 @@ export class RequestForwarder {
         (context) => adapter.createShareLink(
           context.chat_id,
           context.message_id,
+          context.message_ids,
           {
             ...(context.citations.length > 0 ? { citations: context.citations } : {}),
             ...(context.search_results ? { search_results: context.search_results } : {}),
@@ -905,6 +906,7 @@ export class RequestForwarder {
         const shareInfo = await adapter.createShareLink(
           realChatId,
           handler.getLastMessageId() ?? undefined,
+          handler.getMessageIds(),
           handler.getSearchMetadata()
         )
         if (shareInfo) {

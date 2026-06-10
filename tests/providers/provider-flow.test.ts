@@ -220,8 +220,10 @@ test('Kimi K2.6 model mapping reaches the web chat request payload', () => {
 
   assert.equal(payload.scenario, 'SCENARIO_K2D5')
   assert.equal(payload.message.scenario, 'SCENARIO_K2D5')
-  assert.deepEqual(payload.tools, [{ type: 'TOOL_TYPE_SEARCH', search: { force: false }, name: '' }])
+  assert.deepEqual(payload.tools, [{ type: 'TOOL_TYPE_SEARCH', search: {} }])
   assert.equal(payload.options.thinking, true)
+  assert.equal('chat_id' in payload, false)
+  assert.equal('parent_id' in payload.message, false)
 
   const frame = encodeKimiGrpcFrame(payload)
   assert.equal(frame.readUInt8(0), 0)

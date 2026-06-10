@@ -153,6 +153,85 @@ test('Kimi stream emits citations on final chunk', async () => {
   assert.match(output.join(''), /带引用的回答。/)
 })
 
+test('Kimi non-stream collects search artifacts from web_search tool blocks', async () => {
+  const handler = new KimiStreamHandler('kimi-k2.6', 'session-tool')
+  const source = grpcFrames([
+    { chat: { id: 'chat-tool' } },
+    {
+      message: {
+        id: 'user-tool',
+        role: 'user',
+      },
+    },
+    {
+      message: {
+        id: 'assistant-tool',
+        role: 'assistant',
+      },
+    },
+    {
+      op: 'append',
+      mask: 'block.tool.args',
+      block: { id: '1', tool: { args: '{"queries":["' } },
+    },
+    {
+      op: 'append',
+      mask: 'block.tool.args',
+      block: { id: '1', tool: { args: '夏天防晒 2026' } },
+    },
+    {
+      op: 'append',
+      mask: 'block.tool.args',
+      block: { id: '1', tool: { args: '"]}' } },
+    },
+    {
+      op: 'append',
+      mask: 'block.tool.contents',
+      block: {
+        id: '1',
+        tool: {
+          contents: [{
+            searchResult: {
+              id: '1',
+              base: {
+                title: '2026 防晒推荐',
+                url: 'https://example.com/sunscreen',
+                siteName: 'Example Beauty',
+                snippet: '防晒霜和物理防晒建议。',
+              },
+              refIndex: 'web_search:1#0',
+            },
+          }],
+        },
+      },
+    },
+    {
+      op: 'append',
+      mask: 'block.text.content',
+      block: { text: { content: '夏天防晒建议如下。' } },
+    },
+    { done: {} },
+  ])
+
+  const response: any = await handler.handleNonStream(source)
+
+  assert.equal(response.id, 'chat-tool')
+  assert.equal(response.choices[0].message.content, '夏天防晒建议如下。')
+  assert.deepEqual(response.choices[0].message.search_results.keywords, ['夏天防晒 2026'])
+  assert.deepEqual(response.choices[0].message.citations.map((citation: any) => ({
+    index: citation.index,
+    title: citation.title,
+    url: citation.url,
+    siteName: citation.siteName,
+  })), [{
+    index: 1,
+    title: '2026 防晒推荐',
+    url: 'https://example.com/sunscreen',
+    siteName: 'Example Beauty',
+  }])
+  assert.deepEqual(handler.getMessageIds(), ['assistant-tool', 'user-tool'])
+})
+
 test('Kimi stream attaches chat2api share metadata to final chunk', async () => {
   const handler = new KimiStreamHandler(
     'kimi-k2.6',
@@ -163,7 +242,7 @@ test('Kimi stream attaches chat2api share metadata to final chunk', async () => 
       provider: 'kimi',
       chat_id: context.chat_id || 'chat-share',
       message_id: context.message_id,
-      message_ids: context.message_id ? [context.message_id] : undefined,
+      message_ids: context.message_ids,
       conversation_url: `https://www.kimi.com/chat/${context.chat_id}`,
       share_id: 'share-123',
       share_url: 'https://www.kimi.com/share/share-123',
@@ -173,6 +252,12 @@ test('Kimi stream attaches chat2api share metadata to final chunk', async () => 
   )
   const source = grpcFrames([
     { chat: { id: 'chat-share' } },
+    {
+      message: {
+        id: 'user-share',
+        role: 'user',
+      },
+    },
     {
       message: {
         id: 'assistant-share',
@@ -210,6 +295,7 @@ test('Kimi stream attaches chat2api share metadata to final chunk', async () => 
   assert.equal(finalChunk.chat2api.provider, 'kimi')
   assert.equal(finalChunk.chat2api.chat_id, 'chat-share')
   assert.equal(finalChunk.chat2api.message_id, 'assistant-share')
+  assert.deepEqual(finalChunk.chat2api.message_ids, ['assistant-share', 'user-share'])
   assert.equal(finalChunk.chat2api.conversation_url, 'https://www.kimi.com/chat/chat-share')
   assert.equal(finalChunk.chat2api.share_url, 'https://www.kimi.com/share/share-123')
   assert.deepEqual(finalChunk.chat2api.search_results.keywords, ['GEO优化公司推荐'])

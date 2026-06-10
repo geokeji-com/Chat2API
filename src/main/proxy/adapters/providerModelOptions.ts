@@ -87,12 +87,10 @@ export function createKimiChatPayload(options: {
 
   return {
     scenario,
-    chat_id: '',
     tools: options.enableWebSearch
-      ? [{ type: 'TOOL_TYPE_SEARCH', search: { force: false }, name: '' }]
+      ? [{ type: 'TOOL_TYPE_SEARCH', search: {} }]
       : [],
     message: {
-      parent_id: '',
       role: 'user',
       blocks: [{
         message_id: '',
