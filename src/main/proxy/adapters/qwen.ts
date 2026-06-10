@@ -4,21 +4,22 @@
  * Based on new chat2.qianwen.com API
  */
 
-import axios, { AxiosResponse } from 'axios'
+import axios from 'axios'
+import type { AxiosResponse } from 'axios'
 import { PassThrough } from 'stream'
 import { createGunzip, createInflate, createBrotliDecompress } from 'zlib'
 import * as ZstdCodec from 'zstd-codec'
 import { createParser } from 'eventsource-parser'
-import { Account, Provider } from '../../store/types'
-import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse'
-import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected, shouldInjectToolPrompt } from '../utils/tools'
-import { parseToolCallsFromText } from '../utils/toolParser'
-import { createBaseChunk } from '../utils/streamToolHandler'
-import { getProviderToolProfile } from '../toolCalling/providerProfiles'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
-import type { ToolCallingPlan } from '../toolCalling/types'
-import { applyAxiosProxyConfig, type OutboundProxyContext } from '../proxyTransport'
-import { resolveQwenChatOptions } from './providerModelOptions'
+import type { Account, Provider } from '../../store/types.ts'
+import { hasToolUse, parseToolUse, type ToolCall } from '../promptToolUse.ts'
+import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected, shouldInjectToolPrompt } from '../utils/tools.ts'
+import { parseToolCallsFromText } from '../utils/toolParser.ts'
+import { createBaseChunk } from '../utils/streamToolHandler.ts'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
+import { applyAxiosProxyConfig, type OutboundProxyContext } from '../proxyTransport.ts'
+import { resolveQwenChatOptions } from './providerModelOptions.ts'
 
 /**
  * Check if content contains tool calls (both bracket and XML formats)

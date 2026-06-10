@@ -2,7 +2,7 @@ import tls from 'tls'
 import type { AxiosRequestConfig } from 'axios'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 import { SocksClient } from 'socks'
-import type { ProxyNode } from '../store/types'
+import type { ProxyNode } from '../store/types.ts'
 
 export interface OutboundProxyContext {
   node: ProxyNode
