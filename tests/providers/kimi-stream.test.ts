@@ -69,6 +69,10 @@ test('Kimi non-stream returns search keywords and citations', async () => {
     'GEO优化公司推荐',
     '生成式引擎优化服务商',
   ])
+  assert.deepEqual(response.choices[0].message.search_queries, [
+    'GEO优化公司推荐',
+    '生成式引擎优化服务商',
+  ])
   assert.deepEqual(response.choices[0].message.citations.map((citation: any) => ({
     index: citation.index,
     title: citation.title,
@@ -141,6 +145,7 @@ test('Kimi stream emits citations on final chunk', async () => {
   assert.equal(finalChunk.id, 'chat-stream')
   assert.equal(finalChunk.choices[0].finish_reason, 'stop')
   assert.deepEqual(finalChunk.search_results.keywords, ['Kimi 搜索'])
+  assert.deepEqual(finalChunk.search_queries, ['Kimi 搜索'])
   assert.deepEqual(finalChunk.citations.map((citation: any) => ({
     index: citation.index,
     title: citation.title,
@@ -182,7 +187,7 @@ test('Kimi non-stream collects search artifacts from web_search tool blocks', as
     {
       op: 'append',
       mask: 'block.tool.args',
-      block: { id: '1', tool: { args: '"]}' } },
+      block: { id: '1', tool: { args: '"],"related_questions":["夏天户外怎么补防晒？"]}' } },
     },
     {
       op: 'append',
@@ -218,6 +223,8 @@ test('Kimi non-stream collects search artifacts from web_search tool blocks', as
   assert.equal(response.id, 'chat-tool')
   assert.equal(response.choices[0].message.content, '夏天防晒建议如下。')
   assert.deepEqual(response.choices[0].message.search_results.keywords, ['夏天防晒 2026'])
+  assert.deepEqual(response.choices[0].message.search_queries, ['夏天防晒 2026'])
+  assert.deepEqual(response.choices[0].message.related_searches, ['夏天户外怎么补防晒？'])
   assert.deepEqual(response.choices[0].message.citations.map((citation: any) => ({
     index: citation.index,
     title: citation.title,
@@ -248,6 +255,8 @@ test('Kimi stream attaches chat2api share metadata to final chunk', async () => 
       share_url: 'https://www.kimi.com/share/share-123',
       citations: context.citations,
       search_results: context.search_results,
+      search_queries: context.search_queries,
+      related_searches: context.related_searches,
     })
   )
   const source = grpcFrames([
@@ -267,6 +276,7 @@ test('Kimi stream attaches chat2api share metadata to final chunk', async () => 
             case: 'search',
             value: {
               keywords: ['GEO优化公司推荐'],
+              relatedQuestions: ['GEO 优化怎么做？'],
               webPages: [{
                 title: 'GEO 公司榜单',
                 url: 'https://example.com/share-ref',
@@ -299,6 +309,8 @@ test('Kimi stream attaches chat2api share metadata to final chunk', async () => 
   assert.equal(finalChunk.chat2api.conversation_url, 'https://www.kimi.com/chat/chat-share')
   assert.equal(finalChunk.chat2api.share_url, 'https://www.kimi.com/share/share-123')
   assert.deepEqual(finalChunk.chat2api.search_results.keywords, ['GEO优化公司推荐'])
+  assert.deepEqual(finalChunk.chat2api.search_queries, ['GEO优化公司推荐'])
+  assert.deepEqual(finalChunk.chat2api.related_searches, ['GEO 优化怎么做？'])
   assert.deepEqual(finalChunk.chat2api.citations.map((citation: any) => ({
     index: citation.index,
     title: citation.title,
@@ -323,6 +335,7 @@ test('Kimi non-stream collects search artifacts from message blocks', async () =
             case: 'search',
             value: {
               keyword: { text: 'GEO 公司选择' },
+              suggestedQuestions: [{ question: 'GEO 公司怎么选？' }],
               pages: [{
                 index: '3',
                 base: {
@@ -334,6 +347,7 @@ test('Kimi non-stream collects search artifacts from message blocks', async () =
               }],
               steps: [{
                 queries: [{ query: 'GEO 优化服务商报价' }],
+                followUpQuestions: ['GEO 报价一般多少？'],
                 results: [{
                   title: 'GEO 报价参考',
                   link: 'https://example.com/price',
@@ -358,6 +372,14 @@ test('Kimi non-stream collects search artifacts from message blocks', async () =
   assert.deepEqual(response.choices[0].message.search_results.keywords, [
     'GEO 公司选择',
     'GEO 优化服务商报价',
+  ])
+  assert.deepEqual(response.choices[0].message.search_queries, [
+    'GEO 公司选择',
+    'GEO 优化服务商报价',
+  ])
+  assert.deepEqual(response.choices[0].message.related_searches, [
+    'GEO 公司怎么选？',
+    'GEO 报价一般多少？',
   ])
   assert.deepEqual(response.choices[0].message.search_results.webPages.map((citation: any) => ({
     index: citation.index,

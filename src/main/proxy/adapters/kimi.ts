@@ -475,7 +475,7 @@ export class KimiAdapter {
     chatId: string | undefined,
     messageId?: string,
     messageIds: string[] = [],
-    metadata: Pick<KimiChat2ApiInfo, 'citations' | 'search_results'> = {}
+    metadata: KimiSearchMetadata = {}
   ): Promise<KimiChat2ApiInfo | undefined> {
     if (!chatId) {
       return undefined
@@ -670,6 +670,17 @@ export class KimiAdapter {
 }
 
 const STAGE_NAME_THINKING = 'STAGE_NAME_THINKING'
+const RELATED_SEARCH_KEYS = new Set([
+  'relatedsearches',
+  'relatedquestions',
+  'relatedqueries',
+  'suggestedquestions',
+  'suggestedqueries',
+  'followupquestions',
+  'followupqueries',
+  'recommendedquestions',
+  'recommendedqueries',
+])
 
 export interface KimiCitation {
   index: number
@@ -685,6 +696,11 @@ export interface KimiSearchSummary {
   webPages: KimiCitation[]
 }
 
+type KimiSearchMetadata = Pick<
+  KimiChat2ApiInfo,
+  'citations' | 'search_results' | 'search_queries' | 'related_searches'
+>
+
 export interface KimiChat2ApiInfo {
   provider: 'kimi'
   chat_id: string
@@ -696,6 +712,8 @@ export interface KimiChat2ApiInfo {
   share_error?: string
   citations?: KimiCitation[]
   search_results?: KimiSearchSummary
+  search_queries?: string[]
+  related_searches?: string[]
 }
 
 export interface KimiCompletionMetadataContext {
@@ -704,6 +722,8 @@ export interface KimiCompletionMetadataContext {
   message_ids?: string[]
   citations: KimiCitation[]
   search_results?: KimiSearchSummary
+  search_queries: string[]
+  related_searches: string[]
 }
 
 function asArray(value: any): any[] {
@@ -718,6 +738,10 @@ function pickString(...values: any[]): string | undefined {
     }
   }
   return undefined
+}
+
+function normalizeMetadataKey(key: string | undefined): string {
+  return (key || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase()
 }
 
 function uniqueStrings(values: Array<string | undefined | null>): string[] {
@@ -848,6 +872,7 @@ export class KimiStreamHandler {
   private reasoningBuffer: string = ''
   private searchKeywords: string[] = []
   private searchResults: KimiCitation[] = []
+  private relatedSearches: string[] = []
   private toolArgsById: Record<string, string> = {}
   private chat2api?: KimiChat2ApiInfo
   private metadataProvider?: (context: KimiCompletionMetadataContext) => Promise<KimiChat2ApiInfo | undefined>
@@ -898,12 +923,16 @@ export class KimiStreamHandler {
     return this.hasError
   }
 
-  getSearchMetadata(): Pick<KimiChat2ApiInfo, 'citations' | 'search_results'> {
+  getSearchMetadata(): KimiSearchMetadata {
     const citations = this.createCitationList()
     const searchSummary = this.createSearchSummary()
+    const searchQueries = this.createSearchQueries()
+    const relatedSearches = this.createRelatedSearches()
     return {
       ...(citations.length > 0 ? { citations } : {}),
       ...(searchSummary ? { search_results: searchSummary } : {}),
+      ...(searchQueries.length > 0 ? { search_queries: searchQueries } : {}),
+      ...(relatedSearches.length > 0 ? { related_searches: relatedSearches } : {}),
     }
   }
 
@@ -950,6 +979,17 @@ export class KimiStreamHandler {
         : pickString(item?.keyword, item?.query, item?.text, item?.title, item?.content)
       if (keyword && !this.searchKeywords.includes(keyword)) {
         this.searchKeywords = [...this.searchKeywords, keyword]
+      }
+    }
+  }
+
+  private addRelatedSearches(related: any): void {
+    for (const item of asArray(related)) {
+      const question = typeof item === 'string'
+        ? item.trim()
+        : pickString(item?.question, item?.query, item?.text, item?.content, item?.title, item?.keyword)
+      if (question && !this.relatedSearches.includes(question)) {
+        this.relatedSearches = [...this.relatedSearches, question]
       }
     }
   }
@@ -1006,6 +1046,7 @@ export class KimiStreamHandler {
     try {
       const parsed = JSON.parse(nextArgs)
       this.addSearchKeywords(parsed.queries ?? parsed.query ?? parsed.keywords ?? parsed.keyword)
+      this.addRelatedSearches(parsed.related_questions ?? parsed.relatedQuestions ?? parsed.related_searches ?? parsed.relatedSearches)
     } catch {
       // Tool args arrive incrementally; ignore until a complete JSON object is available.
     }
@@ -1042,11 +1083,58 @@ export class KimiStreamHandler {
       : block.search || block
 
     this.addSearchKeywords(search?.keywords ?? search?.keyword ?? search?.queries ?? search?.query ?? search?.searchQueries)
+    this.addRelatedSearches(
+      search?.relatedQuestions
+      ?? search?.related_questions
+      ?? search?.relatedSearches
+      ?? search?.related_searches
+      ?? search?.suggestedQuestions
+      ?? search?.suggested_questions
+      ?? search?.followUpQuestions
+      ?? search?.follow_up_questions
+      ?? search?.recommendedQuestions
+      ?? search?.recommended_questions
+    )
     this.addSearchResults(search?.webPages ?? search?.web_pages ?? search?.pages ?? search?.results)
 
     for (const step of asArray(search?.steps)) {
       this.addSearchKeywords(step?.keywords ?? step?.keyword ?? step?.queries ?? step?.query)
+      this.addRelatedSearches(
+        step?.relatedQuestions
+        ?? step?.related_questions
+        ?? step?.relatedSearches
+        ?? step?.related_searches
+        ?? step?.suggestedQuestions
+        ?? step?.suggested_questions
+        ?? step?.followUpQuestions
+        ?? step?.follow_up_questions
+      )
       this.addSearchResults(step?.webPages ?? step?.web_pages ?? step?.pages ?? step?.results)
+    }
+  }
+
+  private collectRelatedArtifacts(value: any, key?: string, depth: number = 0): void {
+    if (value === undefined || value === null || depth > 8) {
+      return
+    }
+
+    if (RELATED_SEARCH_KEYS.has(normalizeMetadataKey(key))) {
+      this.addRelatedSearches(value)
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        this.collectRelatedArtifacts(item, key, depth + 1)
+      }
+      return
+    }
+
+    if (typeof value !== 'object') {
+      return
+    }
+
+    for (const [childKey, childValue] of Object.entries(value)) {
+      this.collectRelatedArtifacts(childValue, childKey, depth + 1)
     }
   }
 
@@ -1075,6 +1163,7 @@ export class KimiStreamHandler {
 
   private collectSearchArtifacts(data: any): void {
     this.collectSearchBlock(data.block, data.op, data.mask)
+    this.collectRelatedArtifacts(data)
 
     if (data.event?.value) {
       this.collectSearchBlock(data.event.value)
@@ -1105,6 +1194,14 @@ export class KimiStreamHandler {
     return [...this.searchResults].sort((a, b) => a.index - b.index)
   }
 
+  private createSearchQueries(): string[] {
+    return [...this.searchKeywords]
+  }
+
+  private createRelatedSearches(): string[] {
+    return [...this.relatedSearches]
+  }
+
   private createSearchSummary(): KimiSearchSummary | undefined {
     const webPages = this.createCitationList()
     if (this.searchKeywords.length === 0 && webPages.length === 0) {
@@ -1127,6 +1224,8 @@ export class KimiStreamHandler {
         message_ids: this.getMessageIds(),
         citations: this.createCitationList(),
         search_results: this.createSearchSummary(),
+        search_queries: this.createSearchQueries(),
+        related_searches: this.createRelatedSearches(),
       })
       if (metadata) {
         this.chat2api = metadata
@@ -1358,11 +1457,19 @@ export class KimiStreamHandler {
     }
     const citations = this.createCitationList()
     const searchSummary = this.createSearchSummary()
+    const searchQueries = this.createSearchQueries()
+    const relatedSearches = this.createRelatedSearches()
     if (citations.length > 0) {
       finalChunk.citations = citations
     }
     if (searchSummary) {
       finalChunk.search_results = searchSummary
+    }
+    if (searchQueries.length > 0) {
+      finalChunk.search_queries = searchQueries
+    }
+    if (relatedSearches.length > 0) {
+      finalChunk.related_searches = relatedSearches
     }
     if (this.chat2api) {
       finalChunk.chat2api = this.chat2api
@@ -1415,11 +1522,19 @@ export class KimiStreamHandler {
 
     const citations = this.createCitationList()
     const searchSummary = this.createSearchSummary()
+    const searchQueries = this.createSearchQueries()
+    const relatedSearches = this.createRelatedSearches()
     if (citations.length > 0) {
       message.citations = citations
     }
     if (searchSummary) {
       message.search_results = searchSummary
+    }
+    if (searchQueries.length > 0) {
+      message.search_queries = searchQueries
+    }
+    if (relatedSearches.length > 0) {
+      message.related_searches = relatedSearches
     }
 
     return {

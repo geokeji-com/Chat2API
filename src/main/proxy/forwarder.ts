@@ -865,6 +865,8 @@ export class RequestForwarder {
           {
             ...(context.citations.length > 0 ? { citations: context.citations } : {}),
             ...(context.search_results ? { search_results: context.search_results } : {}),
+            ...(context.search_queries.length > 0 ? { search_queries: context.search_queries } : {}),
+            ...(context.related_searches.length > 0 ? { related_searches: context.related_searches } : {}),
           }
         )
       )
@@ -991,7 +993,14 @@ export class RequestForwarder {
           }
         : undefined
 
-      const handler = new QwenStreamHandler(actualModel, deleteSessionCallback, transformed.plan, sessionId, reqId)
+      const handler = new QwenStreamHandler(
+        actualModel,
+        deleteSessionCallback,
+        transformed.plan,
+        sessionId,
+        reqId,
+        (sid, rid) => adapter.createShareLink(sid, rid),
+      )
 
       if (request.stream) {
         const transformedStream = await handler.handleStream(response.data, response)
