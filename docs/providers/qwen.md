@@ -6,13 +6,13 @@
 | 官网 | https://www.qianwen.com |
 | API Base | https://chat2.qianwen.com |
 | 认证 | Tongyi SSO Ticket |
-| 凭据字段 | `ticket` |
+| 凭据字段 | `ticket`，可选 `cookie` / `csrfToken` / `umidToken` / `deviceId` |
 
 ## 默认模型
 
 | 显示名称 | 实际模型 ID |
 | --- | --- |
-| Qwen3.6 | Qwen |
+| Qwen3.7-千问 | Qwen |
 | Qwen3.7-Max | Qwen3.7-Max |
 | Qwen3.5-Flash | Qwen3.5-Flash |
 | Qwen3-Max | Qwen3-Max |
@@ -29,5 +29,5 @@
 
 1. 登录 `www.qianwen.com`。
 2. 打开 DevTools -> Application -> Cookies，复制 `tongyi_sso_ticket`。
-3. 在供应商管理中添加 Qwen 账号，填入 `ticket`。
+3. 在供应商管理中添加 Qwen 账号，填入 `ticket`。如果接口返回风控或鉴权错误，可额外填入网页请求里的完整 Cookie、CSRF Token 和 UMID Token。
 4. 注意本供应商 ID 是 `qwen`，不是 `qwen-ai`。

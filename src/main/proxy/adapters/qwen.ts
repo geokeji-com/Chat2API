@@ -18,6 +18,7 @@ import { getProviderToolProfile } from '../toolCalling/providerProfiles'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
 import type { ToolCallingPlan } from '../toolCalling/types'
 import { applyAxiosProxyConfig, type OutboundProxyContext } from '../proxyTransport'
+import { resolveQwenChatOptions } from './providerModelOptions'
 
 /**
  * Check if content contains tool calls (both bracket and XML formats)
@@ -29,15 +30,6 @@ function hasToolCalls(content: string): boolean {
 const QWEN_API_BASE = 'https://chat2.qianwen.com'
 const QWEN_CHAT2_API_BASE = 'https://chat2-api.qianwen.com'
 const QWEN_CHAT_SIDE_API_BASE = 'https://chat-side.qianwen.com'
-
-const MODEL_MAP: Record<string, string> = {
-  'Qwen3.6': 'Qwen',
-  'Qwen3.7-Max': 'Qwen3.7-Max',
-  'Qwen3.5-Flash': 'Qwen3.5-Flash',
-  'Qwen3-Max': 'Qwen3-Max',
-  'Qwen3-Max-Thinking-Preview': 'Qwen3-Max-Thinking-Preview',
-  'Qwen3-Coder': 'Qwen3-Coder',
-}
 
 const DEFAULT_HEADERS = {
   Accept: 'application/json, text/event-stream, text/plain, */*',
@@ -99,6 +91,11 @@ interface QwenChat2ApiInfo {
   share_url?: string
   share_error?: string
 }
+
+type QwenShareInfoProvider = (
+  sessionId: string,
+  reqId: string,
+) => Promise<QwenChat2ApiInfo | undefined>
 
 interface QwenSessionListPage {
   sessionIds: string[]
@@ -365,6 +362,15 @@ function extractTextContent(content: string | any[]): string {
   return ''
 }
 
+function extractCookieValue(cookie: string, name: string): string {
+  const match = cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`))
+  return match?.[1] || ''
+}
+
+function createQwenShareUrl(shareId: string): string {
+  return `https://www.qianwen.com/share/chat?biz_id=ai_qwen&env=prod&qwcontainer=qk&share_id=${encodeURIComponent(shareId)}`
+}
+
 export class QwenAdapter {
   private provider: Provider
   private account: Account
@@ -383,34 +389,61 @@ export class QwenAdapter {
 
   private getTicket(): string {
     const credentials = this.account.credentials
-    return credentials.ticket || credentials.tongyi_sso_ticket || ''
+    const cookie = credentials.cookie || credentials.cookies || ''
+    return credentials.ticket
+      || credentials.tongyi_sso_ticket
+      || extractCookieValue(cookie, 'tongyi_sso_ticket')
   }
 
-  private mapModel(model: string): string {
-    if (MODEL_MAP[model]) {
-      return MODEL_MAP[model]
+  private getCookieHeader(ticket: string = this.getTicket()): string {
+    const credentials = this.account.credentials
+    const cookie = credentials.cookie || credentials.cookies
+    return cookie?.trim() || `tongyi_sso_ticket=${ticket}`
+  }
+
+  private getDeviceId(): string {
+    const credentials = this.account.credentials
+    return credentials.deviceId || credentials.device_id || '5b68c267-cd8e-fd0e-148a-18345bc9a104'
+  }
+
+  private getOptionalAuthHeaders(): Record<string, string> {
+    const credentials = this.account.credentials
+    const csrfToken = credentials.csrfToken || credentials.csrf_token || credentials.xsrfToken || credentials.xsrf_token
+    const umidToken = credentials.umidToken || credentials.umid_token || credentials.bxUmidToken || credentials.bx_umidtoken
+
+    return {
+      ...(csrfToken ? {
+        'x-csrf-token': csrfToken,
+        'X-XSRF-TOKEN': csrfToken,
+        'x-xsrf-token': csrfToken,
+      } : {}),
+      ...(umidToken ? { 'bx-umidtoken': umidToken } : {}),
     }
-    return model
   }
 
   private getApiHeaders(ticket: string): Record<string, string> {
+    const deviceId = this.getDeviceId()
+
     return {
-      Cookie: `tongyi_sso_ticket=${ticket}`,
+      Cookie: this.getCookieHeader(ticket),
       ...DEFAULT_HEADERS,
       'Content-Type': 'application/json',
       'X-Platform': 'pc_tongyi',
-      'X-DeviceId': '5b68c267-cd8e-fd0e-148a-18345bc9a104',
+      'X-DeviceId': deviceId,
+      ...this.getOptionalAuthHeaders(),
     }
   }
 
   private getApiParams(extra: Record<string, string | number> = {}): Record<string, string | number> {
+    const deviceId = this.getDeviceId()
+
     return {
       biz_id: 'ai_qwen',
       chat_client: 'h5',
       device: 'pc',
       fr: 'pc',
       pr: 'qwen',
-      ut: '5b68c267-cd8e-fd0e-148a-18345bc9a104',
+      ut: deviceId,
       la: 'zh_CN',
       tz: 'Asia/Shanghai',
       wv: '1',
@@ -556,42 +589,22 @@ export class QwenAdapter {
 
     const reqId = uuid(false)
     const sessionId = uuid(false)
-    
-    let actualModel = this.mapModel(request.model)
-    
-    // Determine if thinking and web search should be enabled
-    // Priority: explicit parameters > model name detection
-    // Use originalModel for feature detection (preserves user's intent before mapping)
-    const modelForDetection = request.originalModel || request.model
-    const modelLower = modelForDetection.toLowerCase()
-    
-    let enableThinking = request.enableThinking ?? false
-    let enableWebSearch = request.enableWebSearch ?? false
-    
-    // Auto-enable based on model name (if not explicitly set)
-    if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
-      enableThinking = true
-      console.log('[Qwen] Thinking mode enabled (from model name)')
-    }
-    if (!enableWebSearch && modelLower.includes('search')) {
-      enableWebSearch = true
-      console.log('[Qwen] Web search enabled (from model name)')
-    }
-
-    // Map thinking mode to model
-    if (enableThinking) {
-      // Use thinking model if available
-      if (actualModel === 'Qwen3-Max') {
-        actualModel = 'Qwen3-Max-Thinking-Preview'
-        console.log('[Qwen] Using thinking model:', actualModel)
-      }
-    }
+    const topicId = uuid(false)
+    const options = resolveQwenChatOptions(request)
+    const actualModel = options.actualModel
     
     console.log('[Qwen] Session info:', {
       sessionId,
       reqId,
     })
     console.log('[Qwen] Using model:', actualModel)
+    console.log('[Qwen] Request mode:', {
+      requestedModel: request.originalModel || request.model,
+      actualModel,
+      smartWebSearch: options.searchEnabled,
+      thinking: options.thinkingEnabled,
+      deepSearch: options.deepSearch,
+    })
 
     const toolProfile = getProviderToolProfile('qwen')
 
@@ -639,37 +652,52 @@ export class QwenAdapter {
 
     const timestamp = Date.now()
     const nonce = generateNonce()
+    const deviceId = this.getDeviceId()
 
     const requestBody = {
-      deep_search: (enableWebSearch || enableThinking) ? '1' : '0',
       req_id: reqId,
-      model: actualModel,
-      scene: 'chat',
-      session_id: sessionId,
-      sub_scene: 'chat',
-      temporary: false,
+      parent_req_id: '0',
       messages: [
         {
-          content: finalContent,
           mime_type: 'text/plain',
+          content: finalContent,
           meta_data: {
             ori_query: finalContent
-          }
+          },
+          status: 'complete'
         }
       ],
-      from: 'default',
-      parent_req_id: '0',
-      enable_search: enableWebSearch,
-      biz_data: '{"entryPoint":"tongyigw"}',
+      scene: 'chat',
+      sub_scene: '',
       scene_param: 'first_turn',
-      chat_client: 'h5',
-      client_tm: timestamp.toString(),
+      session_id: sessionId,
+      biz_id: 'ai_qwen',
+      topic_id: topicId,
+      model: actualModel,
+      from: 'default',
       protocol_version: 'v2',
-      biz_id: 'ai_qwen'
+      messages_merge: false,
+      chat_client: 'h5',
+      deep_search: options.deepSearch,
+      temporary: false
     }
 
-    const queryString = `biz_id=ai_qwen&chat_client=h5&device=pc&fr=pc&pr=qwen&ut=${uuid(false)}&nonce=${nonce}&timestamp=${timestamp}`
-    const url = `${QWEN_API_BASE}/api/v2/chat?${queryString}`
+    const queryParams = new URLSearchParams({
+      biz_id: 'ai_qwen',
+      fe_version: '1.0.0',
+      chat_client: 'h5',
+      device: 'pc',
+      fr: 'pc',
+      pr: 'qwen',
+      ut: deviceId,
+      la: 'zh-CN',
+      tz: 'Asia/Shanghai',
+      wv: '2.11.6',
+      ve: '2.11.6',
+      nonce,
+      timestamp: timestamp.toString(),
+    })
+    const url = `${QWEN_API_BASE}/api/v2/chat?${queryParams.toString()}`
 
     console.log('[Qwen] Sending request to /api/v2/chat...')
 
@@ -677,7 +705,13 @@ export class QwenAdapter {
       headers: {
         ...DEFAULT_HEADERS,
         'Content-Type': 'application/json',
-        Cookie: `tongyi_sso_ticket=${ticket}`,
+        Cookie: this.getCookieHeader(ticket),
+        'x-device-id': deviceId,
+        'x-platform': 'pc_tongyi',
+        'x-wpk-reqid': reqId,
+        'x-chat-id': reqId,
+        'x-chat-biz': JSON.stringify({ chatId: reqId, agentId: '', enableWebp: '' }),
+        ...this.getOptionalAuthHeaders(),
       },
       responseType: 'stream',
       timeout: 120000,
@@ -705,6 +739,74 @@ export class QwenAdapter {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
       console.warn('[Qwen] Failed to delete session:', errorMessage)
       return false
+    }
+  }
+
+  async createShareLink(sessionId: string, reqId: string): Promise<QwenChat2ApiInfo> {
+    const ticket = this.getTicket()
+    const baseInfo: QwenChat2ApiInfo = {
+      provider: 'qwen',
+      ...(sessionId ? { session_id: sessionId } : {}),
+      ...(reqId ? { req_id: reqId } : {}),
+    }
+
+    if (!ticket) {
+      return {
+        ...baseInfo,
+        share_error: 'Qwen ticket not configured, cannot create share link',
+      }
+    }
+
+    if (!sessionId || !reqId) {
+      return {
+        ...baseInfo,
+        share_error: 'Qwen session_id or req_id missing, cannot create share link',
+      }
+    }
+
+    try {
+      const response = await this.axiosInstance.post(
+        `${QWEN_CHAT2_API_BASE}/api/v1/share/create`,
+        {
+          session_id: sessionId,
+          share_type: 1,
+          msgs: [{ req_id: reqId, type: '1' }],
+        },
+        applyAxiosProxyConfig({
+          headers: {
+            ...this.getApiHeaders(ticket),
+            Referer: `https://www.qianwen.com/chat/${sessionId}`,
+          },
+          params: this.getApiParams({
+            la: 'zh-CN',
+            wv: '2.11.6',
+            ve: '2.11.6',
+          }),
+          timeout: 15000,
+          validateStatus: () => true,
+        }, this.outboundProxy)
+      )
+
+      console.log('[Qwen] Create share response:', JSON.stringify(response.data, null, 2))
+
+      const shareId = pickString(response.data?.data?.share_id, response.data?.share_id)
+      if (response.status !== 200 || !shareId) {
+        return {
+          ...baseInfo,
+          share_error: response.data?.msg || response.data?.errorMsg || `HTTP ${response.status}`,
+        }
+      }
+
+      return {
+        ...baseInfo,
+        share_id: shareId,
+        share_url: createQwenShareUrl(shareId),
+      }
+    } catch (error) {
+      return {
+        ...baseInfo,
+        share_error: error instanceof Error ? error.message : 'Failed to create Qwen share link',
+      }
     }
   }
 
@@ -776,13 +878,16 @@ export class QwenStreamHandler {
   private relatedSearches: string[] = []
   private shareId: string = ''
   private shareUrl: string = ''
+  private shareError: string = ''
+  private shareInfoProvider?: QwenShareInfoProvider
 
   constructor(
     model: string,
     onEnd?: (sessionId: string) => void,
     toolCallingPlan?: ToolCallingPlan,
     sessionId: string = '',
-    reqId: string = ''
+    reqId: string = '',
+    shareInfoProvider?: QwenShareInfoProvider
   ) {
     this.model = model
     this.created = Math.floor(Date.now() / 1000)
@@ -792,6 +897,7 @@ export class QwenStreamHandler {
     this.sessionId = sessionId
     this.reqId = reqId
     this.responseId = reqId
+    this.shareInfoProvider = shareInfoProvider
   }
 
   hasSessionError(): boolean {
@@ -1004,11 +1110,41 @@ export class QwenStreamHandler {
       ...(this.shareUrl ? { share_url: this.shareUrl } : {}),
     }
 
-    if (!info.share_url) {
-      info.share_error = 'Qwen share link endpoint is not implemented yet'
+    if (this.shareError) {
+      info.share_error = this.shareError
     }
 
     return info
+  }
+
+  private async ensureShareInfo(): Promise<void> {
+    if (!this.shareInfoProvider || this.shareUrl || this.shareError) {
+      return
+    }
+
+    const reqId = this.responseId || this.reqId
+    if (!this.sessionId || !reqId) {
+      this.shareError = 'Qwen session_id or req_id missing, cannot create share link'
+      return
+    }
+
+    try {
+      const shareInfo = await this.shareInfoProvider(this.sessionId, reqId)
+      if (!shareInfo) {
+        return
+      }
+      if (shareInfo.share_id) {
+        this.shareId = shareInfo.share_id
+      }
+      if (shareInfo.share_url) {
+        this.shareUrl = shareInfo.share_url
+      }
+      if (shareInfo.share_error) {
+        this.shareError = shareInfo.share_error
+      }
+    } catch (error) {
+      this.shareError = error instanceof Error ? error.message : 'Failed to create Qwen share link'
+    }
   }
 
   private attachMetadataToResponse(data: any): void {
@@ -1021,6 +1157,9 @@ export class QwenStreamHandler {
       }
       if (searchSummary) {
         message.search_results = searchSummary
+      }
+      if (this.searchKeywords.length > 0) {
+        message.search_queries = [...this.searchKeywords]
       }
       if (this.relatedSearches.length > 0) {
         message.related_searches = [...this.relatedSearches]
@@ -1049,6 +1188,9 @@ export class QwenStreamHandler {
     if (searchSummary) {
       finalChunk.search_results = searchSummary
     }
+    if (this.searchKeywords.length > 0) {
+      finalChunk.search_queries = [...this.searchKeywords]
+    }
     if (this.relatedSearches.length > 0) {
       finalChunk.related_searches = [...this.relatedSearches]
     }
@@ -1066,6 +1208,7 @@ export class QwenStreamHandler {
 
     let buffer = ''
     let streamEnded = false
+    let finalizing = false
 
     const safeEnd = (data?: string) => {
       if (streamEnded) return
@@ -1075,6 +1218,15 @@ export class QwenStreamHandler {
       } else {
         transStream.end()
       }
+    }
+
+    const finalizeStream = async (finishReason: 'stop' | 'tool_calls') => {
+      if (streamEnded || finalizing) return
+      finalizing = true
+      await this.ensureShareInfo()
+      transStream.write(`data: ${JSON.stringify(this.createFinalChunk(finishReason))}\n\n`)
+      safeEnd('data: [DONE]\n\n')
+      this.onEnd?.(this.sessionId)
     }
 
     const processBuffer = () => {
@@ -1251,9 +1403,7 @@ export class QwenStreamHandler {
                     // Check if we emitted tool calls
                     const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
                     
-                    transStream.write(`data: ${JSON.stringify(this.createFinalChunk(finishReason))}\n\n`)
-                    safeEnd('data: [DONE]\n\n')
-                    this.onEnd?.(this.sessionId)
+                    void finalizeStream(finishReason)
                   }
                 }
               }
@@ -1294,8 +1444,7 @@ export class QwenStreamHandler {
             // Check if we emitted tool calls
             const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
             
-            transStream.write(`data: ${JSON.stringify(this.createFinalChunk(finishReason))}\n\n`)
-            safeEnd('data: [DONE]\n\n')
+            void finalizeStream(finishReason)
           }
         }
       }
@@ -1326,7 +1475,9 @@ export class QwenStreamHandler {
             const decompressedStr = Buffer.from(decompressed).toString('utf8')
             buffer = decompressedStr
             processBuffer()
-            safeEnd('data: [DONE]\n\n')
+            if (!this.stopSent && !finalizing) {
+              safeEnd('data: [DONE]\n\n')
+            }
           })
         } catch (err) {
           console.error('[Qwen] Zstd decompression error:', err)
@@ -1353,7 +1504,9 @@ export class QwenStreamHandler {
       console.log('[Qwen] Stream closed')
       if (streamEnded) return
       processBuffer()
-      safeEnd('data: [DONE]\n\n')
+      if (!this.stopSent && !finalizing) {
+        safeEnd('data: [DONE]\n\n')
+      }
     })
 
     return transStream
@@ -1376,6 +1529,7 @@ export class QwenStreamHandler {
             tool_calls?: any[]
             citations?: QwenCitation[]
             search_results?: QwenSearchSummary
+            search_queries?: string[]
             related_searches?: string[]
           }
           finish_reason: string
@@ -1416,10 +1570,11 @@ export class QwenStreamHandler {
         }
       }
 
-      const resolveWithMetadata = () => {
+      const resolveWithMetadata = async () => {
         if (resolved) return
-        this.attachMetadataToResponse(data)
         resolved = true
+        await this.ensureShareInfo()
+        this.attachMetadataToResponse(data)
         resolve(data)
       }
 
@@ -1543,7 +1698,7 @@ export class QwenStreamHandler {
                       }
                       
                       this.onEnd?.(this.sessionId)
-                      resolveWithMetadata()
+                      void resolveWithMetadata()
                       return
                     }
                   }
@@ -1562,7 +1717,7 @@ export class QwenStreamHandler {
             if (thinkingAccumulator) {
               data.choices[0].message.reasoning_content = thinkingAccumulator
             }
-            resolveWithMetadata()
+            void resolveWithMetadata()
             return
           }
         }
@@ -1600,7 +1755,7 @@ export class QwenStreamHandler {
               if (thinkingAccumulator) {
                 data.choices[0].message.reasoning_content = thinkingAccumulator
               }
-              resolveWithMetadata()
+              void resolveWithMetadata()
             })
           } catch (err) {
             console.error('[Qwen] Zstd decompression error:', err)
@@ -1634,7 +1789,7 @@ export class QwenStreamHandler {
           if (thinkingAccumulator) {
             data.choices[0].message.reasoning_content = thinkingAccumulator
           }
-          resolveWithMetadata()
+          void resolveWithMetadata()
         }
       })
       decompressStream.once('end', () => {
@@ -1647,7 +1802,7 @@ export class QwenStreamHandler {
           if (thinkingAccumulator) {
             data.choices[0].message.reasoning_content = thinkingAccumulator
           }
-          resolveWithMetadata()
+          void resolveWithMetadata()
         }
       })
     })

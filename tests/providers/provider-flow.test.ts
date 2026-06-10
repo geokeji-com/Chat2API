@@ -26,6 +26,7 @@ import {
   encodeKimiGrpcFrame,
   resolveDeepSeekChatOptions,
   resolveKimiScenario,
+  resolveQwenChatOptions,
 } from '../../src/main/proxy/adapters/providerModelOptions.ts'
 
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
@@ -259,7 +260,7 @@ test('Kimi and domestic Qwen support account-level chat cleanup', () => {
 
 test('domestic Qwen models match the web chat model ids captured from HAR', () => {
   const expectedModels = [
-    'Qwen3.6',
+    'Qwen3.7-千问',
     'Qwen3.7-Max',
     'Qwen3.5-Flash',
     'Qwen3-Max',
@@ -267,7 +268,7 @@ test('domestic Qwen models match the web chat model ids captured from HAR', () =
     'Qwen3-Coder',
   ]
   const expectedMappings = {
-    'Qwen3.6': 'Qwen',
+    'Qwen3.7-千问': 'Qwen',
     'Qwen3.7-Max': 'Qwen3.7-Max',
     'Qwen3.5-Flash': 'Qwen3.5-Flash',
     'Qwen3-Max': 'Qwen3-Max',
@@ -278,15 +279,43 @@ test('domestic Qwen models match the web chat model ids captured from HAR', () =
   assert.deepEqual(qwenConfig.supportedModels, expectedModels)
   assert.deepEqual(qwenConfig.modelMappings, expectedMappings)
 
-  const qwenAdapterSource = readFileSync(join(root, 'src/main/proxy/adapters/qwen.ts'), 'utf8')
+  const providerOptionsSource = readFileSync(join(root, 'src/main/proxy/adapters/providerModelOptions.ts'), 'utf8')
   const zh = JSON.parse(readFileSync(join(root, 'src/renderer/src/i18n/locales/zh-CN.json'), 'utf8'))
   const en = JSON.parse(readFileSync(join(root, 'src/renderer/src/i18n/locales/en-US.json'), 'utf8'))
 
-  assert.match(qwenAdapterSource, /'Qwen3\.6': 'Qwen'/)
-  assert.match(qwenAdapterSource, /'Qwen3-Coder': 'Qwen3-Coder'/)
-  assert.doesNotMatch(qwenAdapterSource, /qwen3-coder-plus|tongyi-qwen3-max-model-agent|tongyi-qwen-plus-agent/)
+  assert.match(providerOptionsSource, /'Qwen3\.7-千问': 'Qwen'/)
+  assert.match(providerOptionsSource, /'Qwen3-Coder': 'Qwen3-Coder'/)
+  assert.doesNotMatch(providerOptionsSource, /qwen3-coder-plus|tongyi-qwen3-max-model-agent|tongyi-qwen-plus-agent/)
   assert.deepEqual(zh.qwen.models, expectedMappings)
   assert.deepEqual(en.qwen.models, expectedMappings)
+})
+
+test('domestic Qwen smart web search uses non-thinking web chat payload mode', () => {
+  assert.deepEqual(
+    resolveQwenChatOptions({ model: 'Qwen3.7-千问' }),
+    { actualModel: 'Qwen', searchEnabled: false, thinkingEnabled: false, deepSearch: '0' },
+  )
+  assert.deepEqual(
+    resolveQwenChatOptions({ model: 'Qwen3.7-千问', web_search: true }),
+    { actualModel: 'Qwen', searchEnabled: true, thinkingEnabled: false, deepSearch: '0' },
+  )
+  assert.deepEqual(
+    resolveQwenChatOptions({ model: 'Qwen3.7-千问', web_search: true, reasoning_effort: 'high' }),
+    { actualModel: 'Qwen', searchEnabled: true, thinkingEnabled: true, deepSearch: '1' },
+  )
+  assert.deepEqual(
+    resolveQwenChatOptions({ model: 'Qwen3-Max', reasoning_effort: 'high' }),
+    {
+      actualModel: 'Qwen3-Max',
+      searchEnabled: false,
+      thinkingEnabled: true,
+      deepSearch: '1',
+    },
+  )
+  assert.deepEqual(
+    resolveQwenChatOptions({ model: 'Qwen3-Max', originalModel: 'Qwen3-Max-Search' }),
+    { actualModel: 'Qwen3-Max', searchEnabled: true, thinkingEnabled: false, deepSearch: '0' },
+  )
 })
 
 test('Qwen AI defaults keep only the filtered current web model set', () => {

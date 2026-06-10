@@ -112,3 +112,54 @@ export function encodeKimiGrpcFrame(payload: unknown): Buffer {
   jsonBuffer.copy(frameBuffer, 5)
   return frameBuffer
 }
+
+export interface QwenChatOptionInput {
+  model: string
+  originalModel?: string
+  web_search?: boolean
+  reasoning_effort?: string
+  enableThinking?: boolean
+  enableWebSearch?: boolean
+}
+
+export interface QwenChatOptions {
+  actualModel: string
+  searchEnabled: boolean
+  thinkingEnabled: boolean
+  deepSearch: '0' | '1'
+}
+
+export const QWEN_MODEL_MAP: Record<string, string> = {
+  'Qwen3.7-千问': 'Qwen',
+  'Qwen3.7-Max': 'Qwen3.7-Max',
+  'Qwen3.5-Flash': 'Qwen3.5-Flash',
+  'Qwen3-Max': 'Qwen3-Max',
+  'Qwen3-Max-Thinking-Preview': 'Qwen3-Max-Thinking-Preview',
+  'Qwen3-Coder': 'Qwen3-Coder',
+}
+
+export function mapQwenModel(model: string): string {
+  return QWEN_MODEL_MAP[model] || model
+}
+
+export function resolveQwenChatOptions(request: QwenChatOptionInput): QwenChatOptions {
+  const modelForDetection = request.originalModel || request.model
+  const modelLower = modelForDetection.toLowerCase()
+
+  let thinkingEnabled = Boolean(request.enableThinking) || Boolean(request.reasoning_effort)
+  let searchEnabled = Boolean(request.enableWebSearch) || Boolean(request.web_search)
+
+  if (!thinkingEnabled && (modelLower.includes('think') || modelLower.includes('r1'))) {
+    thinkingEnabled = true
+  }
+  if (!searchEnabled && modelLower.includes('search')) {
+    searchEnabled = true
+  }
+
+  return {
+    actualModel: mapQwenModel(request.model),
+    searchEnabled,
+    thinkingEnabled,
+    deepSearch: thinkingEnabled ? '1' : '0',
+  }
+}

@@ -356,7 +356,7 @@
     "codeMode": "Code Mode",
     "codeModeDesc": "Use Qwen-Coder model, specialized for programming tasks",
     "models": {
-      "Qwen3.6": "Qwen",
+      "Qwen3.7-千问": "Qwen",
       "Qwen3.7-Max": "Qwen3.7-Max",
       "Qwen3.5-Flash": "Qwen3.5-Flash",
       "Qwen3-Max": "Qwen3-Max",
