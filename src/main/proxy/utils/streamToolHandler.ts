@@ -12,12 +12,7 @@
 import { parseToolCallsFromText } from './toolParser.ts'
 
 // Import types and functions from the new unified module
-import {
-  createStreamState,
-  parseToolCallsStream as unifiedParseToolCallsStream,
-  flushToolCallBuffer as unifiedFlushToolCallBuffer,
-  shouldBlockOutput as unifiedShouldBlockOutput
-} from './toolParser/index.ts'
+import { createStreamState } from './toolParser/index.ts'
 import type { StreamState } from './toolParser/index.ts'
 
 // Re-export StreamState type for backward compatibility
