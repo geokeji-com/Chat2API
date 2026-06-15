@@ -6,6 +6,15 @@ export function normalizeProxyMode(mode?: AccountProxyMode): AccountProxyMode {
   return mode === 'auto' ? 'auto' : 'none'
 }
 
+export function normalizeRegionCode(regionCode?: string | null): string | undefined {
+  const text = String(regionCode || '').trim()
+  if (!text) return undefined
+  if (/^\d{6}$/.test(text)) return `ZH-${text}`
+  const prefixed = text.toUpperCase()
+  if (/^[A-Z]{2}-\d{6}$/.test(prefixed)) return prefixed
+  return undefined
+}
+
 function isNodeCoolingDown(node: ProxyNode, now: number): boolean {
   return node.status === 'cooldown' && Boolean(node.cooldownUntil && node.cooldownUntil > now)
 }

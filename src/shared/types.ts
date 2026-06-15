@@ -5,7 +5,7 @@ export type ProviderStatus = 'online' | 'offline' | 'unknown'
 export type ProviderType = 'builtin' | 'custom'
 
 // Provider vendor type (for OAuth adapters)
-export type ProviderVendor = 'deepseek' | 'glm' | 'kimi' | 'mimo' | 'minimax' | 'qwen' | 'qwen-ai' | 'zai' | 'perplexity' | 'custom'
+export type ProviderVendor = 'deepseek' | 'doubao' | 'yuanbao' | 'glm' | 'kimi' | 'mimo' | 'minimax' | 'qwen' | 'qwen-ai' | 'zai' | 'perplexity' | 'custom'
 
 export type AuthType = 
   | 'oauth' 
@@ -287,7 +287,23 @@ export interface DeepSeekPostShareFollowUpConfig {
   delayMs: number
 }
 
+export interface WorkerAccountLocationConfig {
+  country?: string
+  province?: string
+  city?: string
+  regionCode?: string
+  tags?: string[]
+}
+
+export interface WorkerAccountFeatureConfig {
+  enabled?: boolean
+  maxConcurrency?: number
+  location?: WorkerAccountLocationConfig
+  tags?: string[]
+}
+
 export interface AccountFeatureConfig {
+  worker?: WorkerAccountFeatureConfig
   deepSeekPostShareFollowUp?: DeepSeekPostShareFollowUpConfig
 }
 

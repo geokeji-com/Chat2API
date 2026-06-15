@@ -421,10 +421,35 @@ export interface DeepSeekPostShareFollowUpConfig {
 }
 
 /**
+ * Optional account location metadata used by gateway worker task routing.
+ * This is separate from credentials and can be safely shared in registration summaries.
+ */
+export interface WorkerAccountLocationConfig {
+  country?: string
+  province?: string
+  city?: string
+  regionCode?: string
+  tags?: string[]
+}
+
+/**
+ * Per-account worker routing metadata.
+ * Missing fields mean the worker can still use provider defaults or bound proxy metadata.
+ */
+export interface WorkerAccountFeatureConfig {
+  enabled?: boolean
+  maxConcurrency?: number
+  location?: WorkerAccountLocationConfig
+  tags?: string[]
+}
+
+/**
  * Optional per-account feature configuration.
  * Missing nested fields mean the account inherits provider-level defaults.
  */
 export interface AccountFeatureConfig {
+  /** Gateway worker routing override */
+  worker?: WorkerAccountFeatureConfig
   /** DeepSeek account-level post-share follow-up override */
   deepSeekPostShareFollowUp?: DeepSeekPostShareFollowUpConfig
 }
