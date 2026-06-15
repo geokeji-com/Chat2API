@@ -3,6 +3,7 @@ import type {
   RpaCredentialReference,
   RpaEndpointFinding,
   RpaLearningResult,
+  RpaProviderLearningTarget,
   RpaTarget,
 } from '../../shared/rpa'
 
@@ -10,10 +11,12 @@ export class RequestClassifier {
   classify(options: {
     sessionId: string
     target: RpaTarget
+    learningTarget?: RpaProviderLearningTarget
     requests: RpaCapturedRequest[]
     credentialsReference?: RpaCredentialReference
   }): RpaLearningResult {
-    const findings = options.requests
+    const requests = selectBestRequestSnapshots(options.requests)
+    const findings = requests
       .map((request) => this.classifyRequest(request))
       .filter((finding) => finding.confidence >= 25)
       .sort((a, b) => b.confidence - a.confidence)
@@ -31,12 +34,21 @@ export class RequestClassifier {
       warnings.push('No model-list endpoint was detected. Generated provider config will use the learned request model or a placeholder.')
     }
 
+    if (options.learningTarget?.id === 'yuanbao') {
+      warnings.push('Yuanbao capture target enabled. Pay special attention to x-uskey request headers, /api/user/agent/conversation/create, /api/chat/{id}, and supportFunctions/search fields.')
+    }
+
+    if (options.learningTarget?.id === 'doubao') {
+      warnings.push('Doubao capture target enabled. Pay special attention to browser-injected msToken/a_bogus query parameters, /chat/completion payloads, and SSE event types such as CHUNK_DELTA and STREAM_CHUNK.')
+    }
+
     return {
       sessionId: options.sessionId,
       target: options.target,
+      learningTarget: options.learningTarget,
       origin: getOrigin(options.target.url),
       capturedAt: Date.now(),
-      requests: options.requests,
+      requests,
       findings,
       primaryChat,
       warnings,
@@ -61,14 +73,19 @@ export class RequestClassifier {
     const requestShape = extractShape(requestJson)
     const responseShape = extractShape(responseJson)
     const models = extractModels(responseJson)
+    const queryParamNames = Array.from(url.searchParams.keys())
     const reasons: string[] = []
     let chatScore = 0
     let modelScore = 0
     let sessionScore = 0
+    let shareScore = 0
+    let powScore = 0
 
     if (request.method !== 'GET') {
       chatScore += 10
       sessionScore += 5
+      shareScore += 5
+      powScore += 5
       reasons.push('non-GET request')
     }
 
@@ -76,6 +93,8 @@ export class RequestClassifier {
       chatScore += 12
       modelScore += 8
       sessionScore += 8
+      shareScore += 8
+      powScore += 8
       reasons.push(`${request.resourceType} request`)
     }
 
@@ -89,6 +108,11 @@ export class RequestClassifier {
       reasons.push('chat-like path')
     }
 
+    if (/\/api\/chat\/[^/?]+/i.test(path) || /\/chat\/completion/i.test(path)) {
+      chatScore += 35
+      reasons.push('known web-chat endpoint pattern')
+    }
+
     if (/(model|models)/i.test(path)) {
       modelScore += 28
       reasons.push('model-like path')
@@ -99,9 +123,41 @@ export class RequestClassifier {
       reasons.push('session-like path')
     }
 
+    if (/(^|\/)(chat_)?session\/create|chat_session\/create|conversation\/create|thread\/create/i.test(path)) {
+      sessionScore += 55
+      reasons.push('session-create path')
+    }
+
+    if (/\/api\/user\/agent\/conversation\/create/i.test(path)) {
+      sessionScore += 55
+      reasons.push('Yuanbao conversation-create path')
+    }
+
+    if (/(^|\/)share\/create|\/share($|[/?])|public.*link|copy.*link/i.test(path)) {
+      shareScore += 75
+      reasons.push('share-like path')
+    }
+
+    if (/pow|challenge/i.test(path) || requestShape?.includes('target_path')) {
+      powScore += 70
+      reasons.push('challenge-like path')
+    }
+
     if (/(messages|prompt|query|model|content|stream)/i.test(request.requestBody || '')) {
       chatScore += 26
       reasons.push('request body contains chat fields')
+    }
+
+    if (/(client_meta|content_block|local_conversation_id|need_create_conversation|bot_id)/i.test(request.requestBody || '')) {
+      chatScore += 28
+      sessionScore += 12
+      reasons.push('Doubao-style request body')
+    }
+
+    if (/(agentId|chatModelId|supportFunctions|displayPrompt)/i.test(request.requestBody || '')) {
+      chatScore += 28
+      sessionScore += 8
+      reasons.push('Yuanbao-style request body')
     }
 
     if (/(choices|delta|answer|message|content|reasoning|thinking|citations|conversation)/i.test(request.responseBody || '')) {
@@ -110,22 +166,40 @@ export class RequestClassifier {
       reasons.push('response body contains answer fields')
     }
 
+    if (/(SSE_ACK|STREAM_MSG_NOTIFY|CHUNK_DELTA|STREAM_CHUNK|SSE_REPLY_END)/i.test(request.responseBody || '')) {
+      chatScore += 34
+      reasons.push('Doubao SSE event names')
+    }
+
+    if (/(stopReason|supportInternetSearch|multimedia|yuanbao)/i.test(request.responseBody || '')) {
+      chatScore += 20
+      reasons.push('Yuanbao response markers')
+    }
+
     if (models.length > 0) {
       modelScore += 35
       reasons.push(`response contains ${models.length} model candidate(s)`)
     }
 
     const authHeaders = Object.keys(request.requestHeaders).filter((key) =>
-      /authorization|cookie|token|session|csrf|api.*key/i.test(key),
+      /authorization|cookie|token|session|csrf|api.*key|uskey|flow.*trace/i.test(key),
+    )
+    const authQueryParams = queryParamNames.filter((key) =>
+      /token|session|csrf|key|a[_-]?bogus|msToken|ms_token|verify|signature|sign/i.test(key),
     )
 
     const scores = [
       { kind: 'chat' as const, score: chatScore },
       { kind: 'models' as const, score: modelScore },
       { kind: 'session' as const, score: sessionScore },
+      { kind: 'share' as const, score: shareScore },
+      { kind: 'pow/challenge' as const, score: powScore },
     ].sort((a, b) => b.score - a.score)
 
     const best = scores[0]
+    const reportedModels = best.kind === 'chat' || best.kind === 'models'
+      ? models.slice(0, 50)
+      : []
 
     return {
       kind: best.score > 0 ? best.kind : 'unknown',
@@ -136,10 +210,11 @@ export class RequestClassifier {
       confidence: Math.min(100, best.score),
       reasons: Array.from(new Set(reasons)).slice(0, 8),
       authHeaders,
+      authQueryParams,
       isStreaming: Boolean(request.isEventStream),
       requestShape,
       responseShape,
-      models: models.slice(0, 50),
+      models: reportedModels,
     }
   }
 }
@@ -226,4 +301,27 @@ function getOrigin(url: string): string {
   } catch {
     return ''
   }
+}
+
+function selectBestRequestSnapshots(requests: RpaCapturedRequest[]): RpaCapturedRequest[] {
+  const byRequestId = new Map<string, RpaCapturedRequest>()
+
+  for (const request of requests) {
+    const baseId = request.id.replace(/:(started|response|completed|failed)$/i, '')
+    const current = byRequestId.get(baseId)
+    if (!current || requestSnapshotWeight(request) >= requestSnapshotWeight(current)) {
+      byRequestId.set(baseId, request)
+    }
+  }
+
+  return Array.from(byRequestId.values())
+    .sort((a, b) => a.startedAt - b.startedAt)
+}
+
+function requestSnapshotWeight(request: RpaCapturedRequest): number {
+  if (request.lifecycle === 'completed') return 4
+  if (request.lifecycle === 'response') return 3
+  if (request.lifecycle === 'started') return 2
+  if (request.lifecycle === 'failed') return 1
+  return 0
 }

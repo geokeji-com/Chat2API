@@ -12,6 +12,14 @@ import type {
 
 const DEFAULT_HOST = 'localhost'
 const DEFAULT_PORT = 9222
+const DISCOVERY_PORT_START = 9222
+const DISCOVERY_PORT_END = 9230
+
+interface ResolveTargetOptions {
+  url: string
+  browser?: RpaBrowser
+  port?: number
+}
 
 export class BrowserBridge {
   private host = DEFAULT_HOST
@@ -69,6 +77,56 @@ export class BrowserBridge {
     }, 5000)
   }
 
+  async discoverBrowser(preferredPort?: number): Promise<RpaBrowserConnection | null> {
+    const ports = Array.from(new Set([
+      ...(preferredPort ? [preferredPort] : []),
+      ...Array.from(
+        { length: DISCOVERY_PORT_END - DISCOVERY_PORT_START + 1 },
+        (_, index) => DISCOVERY_PORT_START + index,
+      ),
+    ]))
+
+    for (const port of ports) {
+      const result = await this.waitForConnection({ host: DEFAULT_HOST, port }, 600)
+      if (result.connected) {
+        return result
+      }
+    }
+
+    return null
+  }
+
+  async resolveOrOpenTarget(options: ResolveTargetOptions): Promise<{
+    connection: RpaBrowserConnection
+    target: RpaTarget
+    opened: boolean
+  }> {
+    const desiredUrl = normalizeTargetUrl(options.url)
+    const discovered = await this.discoverBrowser(options.port)
+    const connection = discovered || await this.launchBrowser({
+      browser: options.browser || 'chrome',
+      port: options.port || DEFAULT_PORT,
+      url: desiredUrl,
+    })
+
+    if (!connection.connected) {
+      throw new Error(connection.error || 'Unable to connect to a Chrome DevTools browser')
+    }
+
+    let target = await this.findTargetForUrl(desiredUrl)
+    let opened = false
+
+    if (!target) {
+      target = await this.openTarget(desiredUrl)
+      opened = true
+    }
+
+    await this.waitForNavigableTarget(target.id, desiredUrl, 15000).catch(() => undefined)
+    target = await this.getTarget(target.id) || target
+
+    return { connection, target, opened }
+  }
+
   async listTargets(): Promise<RpaTarget[]> {
     const targets = await this.fetchJson<any[]>('/json/list')
     return targets
@@ -85,6 +143,19 @@ export class BrowserBridge {
   async getTarget(targetId: string): Promise<RpaTarget | undefined> {
     const targets = await this.listTargets()
     return targets.find((target) => target.id === targetId)
+  }
+
+  async openTarget(url: string): Promise<RpaTarget> {
+    const path = `/json/new?${encodeURIComponent(url)}`
+    const target = await this.fetchJson<any>(path, { method: 'PUT' })
+      .catch(() => this.fetchJson<any>(path))
+    return {
+      id: String(target.id),
+      type: String(target.type || 'page'),
+      title: String(target.title || ''),
+      url: String(target.url || url),
+      webSocketDebuggerUrl: target.webSocketDebuggerUrl ? String(target.webSocketDebuggerUrl) : undefined,
+    }
   }
 
   getConnectionInfo(): RpaBrowserConnection {
@@ -131,13 +202,90 @@ export class BrowserBridge {
     }
   }
 
-  private async fetchJson<T>(path: string): Promise<T> {
-    const response = await fetch(`http://${this.host}:${this.port}${path}`)
+  private async fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+    const response = await fetch(`http://${this.host}:${this.port}${path}`, init)
     if (!response.ok) {
       throw new Error(`Chrome DevTools endpoint failed: HTTP ${response.status}`)
     }
     return await response.json() as T
   }
+
+  private async findTargetForUrl(url: string): Promise<RpaTarget | undefined> {
+    const desired = new URL(url)
+    const desiredRoot = getRegistrableRoot(desired.hostname)
+    const targets = await this.listTargets().catch(() => [])
+
+    return targets
+      .filter((target) => target.webSocketDebuggerUrl)
+      .map((target) => ({
+        target,
+        score: scoreTarget(target, desired, desiredRoot),
+      }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)[0]?.target
+  }
+
+  private async waitForNavigableTarget(targetId: string, url: string, timeoutMs: number): Promise<RpaTarget> {
+    const startedAt = Date.now()
+    const desired = new URL(url)
+    const desiredRoot = getRegistrableRoot(desired.hostname)
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const target = await this.getTarget(targetId)
+      if (target && scoreTarget(target, desired, desiredRoot) > 0 && target.webSocketDebuggerUrl) {
+        return target
+      }
+      await delay(400)
+    }
+
+    const target = await this.getTarget(targetId)
+    if (!target) {
+      throw new Error('Opened browser tab disappeared before it became available')
+    }
+    return target
+  }
+}
+
+function normalizeTargetUrl(url: string): string {
+  const trimmed = url.trim()
+  if (!trimmed) {
+    throw new Error('Provider URL is required for automatic RPA learning')
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed
+  }
+  return `https://${trimmed}`
+}
+
+function scoreTarget(target: RpaTarget, desired: URL, desiredRoot: string): number {
+  if (!target.url || target.url === 'about:blank') {
+    return 0
+  }
+
+  try {
+    const targetUrl = new URL(target.url)
+    const targetRoot = getRegistrableRoot(targetUrl.hostname)
+    let score = 0
+
+    if (targetUrl.origin === desired.origin) score += 100
+    if (targetUrl.hostname === desired.hostname) score += 80
+    if (targetRoot && targetRoot === desiredRoot) score += 45
+    if (targetUrl.pathname === desired.pathname) score += 15
+    if (target.title.toLowerCase().includes(desired.hostname.replace(/^www\./, '').split('.')[0])) score += 10
+
+    return score
+  } catch {
+    return 0
+  }
+}
+
+function getRegistrableRoot(hostname: string): string {
+  const parts = hostname.split('.').filter(Boolean)
+  if (parts.length <= 2) {
+    return hostname
+  }
+
+  return parts.slice(-2).join('.')
 }
 
 function resolveBrowserExecutable(browser: RpaBrowser): string | null {

@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { RpaEndpointFinding, RpaLearningResult, RpaPatchPreview } from '../../shared/rpa'
 
+const GENERATED_ROOT = 'src/main/rpa/generated'
+
 export class AdapterCodeGenerator {
   generate(result: RpaLearningResult): RpaPatchPreview {
     const chat = result.primaryChat
@@ -11,35 +13,37 @@ export class AdapterCodeGenerator {
     const models = getModels(result, chat)
     const canApply = Boolean(chat && confidence >= 60)
     const warnings = [...result.warnings]
+    const outputDir = `${GENERATED_ROOT}/${slug}`
 
     if (!canApply) {
       warnings.push('Patch generation is read-only because the learned chat endpoint confidence is below 60.')
     }
+    warnings.push('Generated artifacts are written to the RPA review folder only. Existing provider source files are never overwritten automatically.')
 
     const files = chat
       ? [
           {
-            path: `src/main/providers/builtin/${slug}.ts`,
+            path: `${outputDir}/${slug}.provider.ts`,
             action: 'create' as const,
             content: createProviderConfig({ slug, result, chat, models }),
           },
           {
-            path: `src/main/proxy/adapters/${slug}.ts`,
+            path: `${outputDir}/${slug}.adapter.ts`,
             action: 'create' as const,
             content: createAdapter({ slug, className, result, chat }),
           },
           {
-            path: `src/main/proxy/adapters/${slug}-stream.ts`,
+            path: `${outputDir}/${slug}.stream.ts`,
             action: 'create' as const,
             content: createStreamHandler({ className }),
           },
           {
-            path: `src/main/rpa/generated/${slug}-learning-summary.json`,
+            path: `${outputDir}/learning-summary.json`,
             action: 'create' as const,
             content: `${JSON.stringify(toSummary(result), null, 2)}\n`,
           },
           {
-            path: `src/main/rpa/generated/${slug}-registration.md`,
+            path: `${outputDir}/registration.md`,
             action: 'create' as const,
             content: createRegistrationNotes(slug, className),
           },
@@ -68,11 +72,24 @@ export class AdapterCodeGenerator {
     }
 
     for (const file of preview.files) {
+      if (!isGeneratedReviewPath(file.path)) {
+        throw new Error(`Refusing to write outside the RPA generated review folder: ${file.path}`)
+      }
+
       const absolutePath = join(projectRoot, file.path)
+      if (file.action === 'create' && existsSync(absolutePath) && !isGeneratedReviewPath(file.path)) {
+        throw new Error(`Refusing to overwrite an existing source file: ${file.path}`)
+      }
+
       mkdirSync(dirname(absolutePath), { recursive: true })
       writeFileSync(absolutePath, file.content, 'utf-8')
     }
   }
+}
+
+function isGeneratedReviewPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, '/')
+  return normalized.startsWith(`${GENERATED_ROOT}/`) && !normalized.includes('/../')
 }
 
 function createProviderConfig(options: {

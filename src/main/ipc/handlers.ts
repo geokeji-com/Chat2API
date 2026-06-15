@@ -32,6 +32,9 @@ import type { ProviderType } from '../oauth/types'
 import type {
   RpaConnectBrowserOptions,
   RpaLaunchBrowserOptions,
+  RpaAutoLearnProviderOptions,
+  RpaStartRecordingOptions,
+  RpaStartAutoLearningOptions,
   RpaStartLearningOptions,
 } from '../../shared/rpa'
 
@@ -931,12 +934,32 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return await rpaLearningManager.startLearning(options)
   })
 
+  ipcMain.handle(IpcChannels.RPA_START_RECORDING, async (_, options: RpaStartRecordingOptions) => {
+    return await rpaLearningManager.startRecording(options)
+  })
+
+  ipcMain.handle(IpcChannels.RPA_START_AUTO_LEARNING, async (_, options: RpaStartAutoLearningOptions) => {
+    return await rpaLearningManager.startAutoLearning(options)
+  })
+
+  ipcMain.handle(IpcChannels.RPA_AUTO_LEARN_PROVIDER, async (_, options: RpaAutoLearnProviderOptions) => {
+    return await rpaLearningManager.autoLearnProvider(options)
+  })
+
   ipcMain.handle(IpcChannels.RPA_CANCEL_LEARNING, async () => {
     return await rpaLearningManager.cancelLearning()
   })
 
+  ipcMain.handle(IpcChannels.RPA_STOP_LEARNING, async () => {
+    return await rpaLearningManager.stopLearning()
+  })
+
   ipcMain.handle(IpcChannels.RPA_GET_SESSION, async (_, sessionId: string) => {
     return rpaLearningManager.getSession(sessionId)
+  })
+
+  ipcMain.handle(IpcChannels.RPA_GENERATE_REPORT, async (_, sessionId: string) => {
+    return await rpaLearningManager.generateReport(sessionId)
   })
 
   ipcMain.handle(IpcChannels.RPA_GENERATE_PATCH, async (_, sessionId: string) => {

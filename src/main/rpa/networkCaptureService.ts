@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import type { RpaCapturedRequest, RpaTarget } from '../../shared/rpa'
-import { ChromeCdpClient } from './cdpClient'
-import { sanitizeBody, sanitizeCapturedRequest, sanitizeHeaders } from './sanitizer'
+import { ChromeCdpClient } from './cdpClient.ts'
+import { sanitizeBody, sanitizeCapturedRequest, sanitizeHeaders } from './sanitizer.ts'
 
 interface PartialRequest {
   id: string
@@ -21,15 +21,25 @@ interface PartialRequest {
   error?: string
 }
 
+interface NetworkCaptureOptions {
+  captureDomains?: string[]
+}
+
 export class NetworkCaptureService extends EventEmitter {
   private cdp: ChromeCdpClient | null = null
   private readonly requests = new Map<string, PartialRequest>()
   private readonly captured: RpaCapturedRequest[] = []
-  private readonly allowedRoot: string | null
+  private readonly allowedDomains: string[]
+  private readonly target: RpaTarget
 
-  constructor(private readonly target: RpaTarget) {
+  constructor(target: RpaTarget, options: NetworkCaptureOptions = {}) {
     super()
-    this.allowedRoot = getRegistrableRoot(target.url)
+    this.target = target
+    const captureDomains = Array.isArray(options.captureDomains) ? options.captureDomains : []
+    this.allowedDomains = Array.from(new Set([
+      getRegistrableRoot(target.url),
+      ...captureDomains,
+    ].map(normalizeDomain).filter(Boolean)))
   }
 
   async start(): Promise<void> {
@@ -86,6 +96,8 @@ export class NetworkCaptureService extends EventEmitter {
       requestBody: sanitizeBody(request.postData).body,
       startedAt: Date.now(),
     })
+
+    this.emitRequestSnapshot(params.requestId, 'started')
   }
 
   private handleRequestExtraInfo(params: any): void {
@@ -108,6 +120,8 @@ export class NetworkCaptureService extends EventEmitter {
     request.responseHeaders = sanitizeHeaders(response.headers)
     request.isEventStream = String(response.mimeType || '').includes('event-stream') ||
       String(response.headers?.['content-type'] || response.headers?.['Content-Type'] || '').includes('event-stream')
+
+    this.emitRequestSnapshot(params.requestId, 'response')
   }
 
   private async handleLoadingFinished(params: any): Promise<void> {
@@ -139,7 +153,7 @@ export class NetworkCaptureService extends EventEmitter {
         request.bodyTruncated = sanitized.truncated
       }
     } finally {
-      this.captureCompletedRequest(request)
+      this.captureCompletedRequest(request, 'completed')
       this.requests.delete(params.requestId)
     }
   }
@@ -150,19 +164,41 @@ export class NetworkCaptureService extends EventEmitter {
 
     request.endedAt = Date.now()
     request.error = params.errorText || 'Request failed'
-    this.captureCompletedRequest(request)
+    this.captureCompletedRequest(request, 'failed')
     this.requests.delete(params.requestId)
   }
 
-  private captureCompletedRequest(partial: PartialRequest): void {
+  private emitRequestSnapshot(requestId: string, lifecycle: RpaCapturedRequest['lifecycle']): void {
+    const request = this.requests.get(requestId)
+    if (!request) return
+
+    const captured = this.toCapturedRequest(request, lifecycle)
+    this.captured.push(captured)
+    this.emit('captured', captured)
+  }
+
+  private captureCompletedRequest(
+    partial: PartialRequest,
+    lifecycle: RpaCapturedRequest['lifecycle'],
+  ): void {
+    const captured = this.toCapturedRequest(partial, lifecycle)
+    this.captured.push(captured)
+    this.emit('captured', captured)
+  }
+
+  private toCapturedRequest(
+    partial: PartialRequest,
+    lifecycle: RpaCapturedRequest['lifecycle'],
+  ): RpaCapturedRequest {
     const captured = sanitizeCapturedRequest({
       ...partial,
+      id: `${partial.id}:${lifecycle}`,
+      lifecycle,
       requestHeaders: partial.requestHeaders,
       responseHeaders: partial.responseHeaders,
     })
 
-    this.captured.push(captured)
-    this.emit('captured', captured)
+    return captured
   }
 
   private shouldCaptureUrl(url: string, resourceType: string | undefined): boolean {
@@ -181,7 +217,7 @@ export class NetworkCaptureService extends EventEmitter {
       return false
     }
 
-    if (this.allowedRoot && !parsed.hostname.endsWith(this.allowedRoot)) {
+    if (this.allowedDomains.length > 0 && !this.allowedDomains.some((domain) => hostMatchesDomain(parsed.hostname, domain))) {
       return false
     }
 
@@ -216,7 +252,7 @@ function isLikelyNoise(url: URL): boolean {
   ].some((pattern) => text.includes(pattern))
 }
 
-function getRegistrableRoot(url: string): string | null {
+function getRegistrableRoot(url: string): string | undefined {
   try {
     const hostname = new URL(url).hostname
     const parts = hostname.split('.').filter(Boolean)
@@ -226,6 +262,21 @@ function getRegistrableRoot(url: string): string | null {
 
     return parts.slice(-2).join('.')
   } catch {
-    return null
+    return undefined
   }
+}
+
+function normalizeDomain(value: string | undefined | null): string | undefined {
+  if (!value) return undefined
+
+  try {
+    return new URL(value).hostname.toLowerCase().replace(/^\*\./, '').replace(/^\./, '')
+  } catch {
+    return value.trim().toLowerCase().replace(/^\*\./, '').replace(/^\./, '') || undefined
+  }
+}
+
+function hostMatchesDomain(hostname: string, domain: string): boolean {
+  const host = hostname.toLowerCase()
+  return host === domain || host.endsWith(`.${domain}`)
 }

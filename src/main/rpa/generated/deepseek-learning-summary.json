@@ -1,0 +1,167 @@
+{
+  "sessionId": "1781020133784-9q36pan7e",
+  "target": {
+    "id": "BF7470851CD7322296964C1FE70D7BEC",
+    "type": "page",
+    "title": "DeepSeek - 探索未至之境",
+    "url": "https://chat.deepseek.com/",
+    "webSocketDebuggerUrl": "ws://localhost:9222/devtools/page/BF7470851CD7322296964C1FE70D7BEC"
+  },
+  "origin": "https://chat.deepseek.com",
+  "capturedAt": 1781020208129,
+  "primaryChat": {
+    "kind": "chat",
+    "method": "POST",
+    "url": "https://chat.deepseek.com/api/v0/chat/completion",
+    "path": "/api/v0/chat/completion",
+    "status": 200,
+    "confidence": 100,
+    "reasons": [
+      "non-GET request",
+      "XHR request",
+      "streaming response",
+      "chat-like path",
+      "request body contains chat fields",
+      "response body contains answer fields",
+      "response contains 1 model candidate(s)"
+    ],
+    "authHeaders": [
+      "authorization",
+      "cookie"
+    ],
+    "isStreaming": true,
+    "requestShape": [
+      "chat_session_id",
+      "parent_message_id",
+      "model_type",
+      "prompt",
+      "ref_file_ids",
+      "thinking_enabled",
+      "search_enabled",
+      "action",
+      "preempt"
+    ],
+    "responseShape": [
+      "request_message_id",
+      "response_message_id",
+      "model_type"
+    ],
+    "models": [
+      "default"
+    ]
+  },
+  "findings": [
+    {
+      "kind": "chat",
+      "method": "POST",
+      "url": "https://chat.deepseek.com/api/v0/chat/completion",
+      "path": "/api/v0/chat/completion",
+      "status": 200,
+      "confidence": 100,
+      "reasons": [
+        "non-GET request",
+        "XHR request",
+        "streaming response",
+        "chat-like path",
+        "request body contains chat fields",
+        "response body contains answer fields",
+        "response contains 1 model candidate(s)"
+      ],
+      "authHeaders": [
+        "authorization",
+        "cookie"
+      ],
+      "isStreaming": true,
+      "requestShape": [
+        "chat_session_id",
+        "parent_message_id",
+        "model_type",
+        "prompt",
+        "ref_file_ids",
+        "thinking_enabled",
+        "search_enabled",
+        "action",
+        "preempt"
+      ],
+      "responseShape": [
+        "request_message_id",
+        "response_message_id",
+        "model_type"
+      ],
+      "models": [
+        "default"
+      ]
+    },
+    {
+      "kind": "chat",
+      "method": "POST",
+      "url": "https://chat.deepseek.com/api/v0/chat_session/create",
+      "path": "/api/v0/chat_session/create",
+      "status": 200,
+      "confidence": 70,
+      "reasons": [
+        "non-GET request",
+        "XHR request",
+        "chat-like path",
+        "session-like path",
+        "response body contains answer fields",
+        "response contains 4 model candidate(s)"
+      ],
+      "authHeaders": [
+        "authorization",
+        "cookie"
+      ],
+      "isStreaming": false,
+      "requestShape": [],
+      "responseShape": [
+        "code",
+        "msg",
+        "data"
+      ],
+      "models": [
+        "346a46f5-5d46-47f5-97e3-1b04ca8f7663",
+        "chat",
+        "default",
+        "WIP"
+      ]
+    },
+    {
+      "kind": "models",
+      "method": "POST",
+      "url": "https://chat.deepseek.com/api/v0/share/create",
+      "path": "/api/v0/share/create",
+      "status": 200,
+      "confidence": 43,
+      "reasons": [
+        "non-GET request",
+        "XHR request",
+        "response contains 1 model candidate(s)"
+      ],
+      "authHeaders": [
+        "authorization",
+        "cookie"
+      ],
+      "isStreaming": false,
+      "requestShape": [
+        "chat_session_id",
+        "message_ids"
+      ],
+      "responseShape": [
+        "code",
+        "msg",
+        "data"
+      ],
+      "models": [
+        "bvfk0te3rpz6jjoj0i"
+      ]
+    }
+  ],
+  "warnings": [],
+  "credentialsReference": {
+    "providerId": "deepseek",
+    "accountId": "1780915831092-wm2cza6ib",
+    "credentialKeys": [
+      "token"
+    ]
+  }
+}

@@ -3,7 +3,11 @@ import { useTranslation } from 'react-i18next'
 import {
   Bot,
   CheckCircle,
+  ChevronDown,
+  ChevronUp,
+  Clipboard,
   FileCode,
+  FileText,
   Globe,
   Loader2,
   Play,
@@ -21,14 +25,16 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import type { Account, Provider } from '@shared/types'
-import type {
-  RpaBrowser,
-  RpaCapturedRequest,
-  RpaLearningSessionSummary,
-  RpaPatchPreview,
-  RpaProgressEvent,
-  RpaTarget,
-} from '@shared/rpa'
+import {
+  type RpaBrowser,
+  type RpaAnalysisReport,
+  type RpaCapturedRequest,
+  type RpaLearningSessionSummary,
+  type RpaPatchPreview,
+  type RpaProgressEvent,
+  type RpaAutomationStepResult,
+  type RpaTarget,
+} from '../../../shared/rpa'
 
 export function RpaLearning() {
   const { t } = useTranslation()
@@ -46,12 +52,20 @@ export function RpaLearning() {
   const [session, setSession] = useState<RpaLearningSessionSummary | null>(null)
   const [captured, setCaptured] = useState<RpaCapturedRequest[]>([])
   const [patch, setPatch] = useState<RpaPatchPreview | null>(null)
+  const [report, setReport] = useState<RpaAnalysisReport | null>(null)
   const [progress, setProgress] = useState<RpaProgressEvent | null>(null)
   const [error, setError] = useState('')
+  const [providerUrl, setProviderUrl] = useState('')
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [automationSteps, setAutomationSteps] = useState<RpaAutomationStepResult[]>([])
 
   const providerAccounts = useMemo(
-    () => accounts.filter((account) => !providerId || account.providerId === providerId),
+    () => providerId ? accounts.filter((account) => account.providerId === providerId) : [],
     [accounts, providerId],
+  )
+  const selectedProvider = useMemo(
+    () => providers.find((provider) => provider.id === providerId),
+    [providers, providerId],
   )
 
   useEffect(() => {
@@ -59,6 +73,10 @@ export function RpaLearning() {
 
     const unsubscribeProgress = window.electronAPI?.rpa?.onProgress?.((event) => {
       setProgress(event)
+      const step = event.data?.step as RpaAutomationStepResult | undefined
+      if (step?.step) {
+        setAutomationSteps((current) => upsertStep(current, step))
+      }
       if (event.status === 'error') {
         setError(event.message)
       }
@@ -74,12 +92,22 @@ export function RpaLearning() {
   }, [])
 
   const loadProviders = async () => {
-    const [providerList, accountList] = await Promise.all([
+    const [providerList, builtinProviderList, accountList] = await Promise.all([
       window.electronAPI?.providers?.getAll?.() || Promise.resolve([]),
+      window.electronAPI?.providers?.getBuiltin?.() || Promise.resolve([]),
       window.electronAPI?.accounts?.getAll?.() || Promise.resolve([]),
     ])
-    setProviders(providerList)
+    const mergedProviders = mergeProviderReferences(providerList, builtinProviderList as Provider[])
+    setProviders(mergedProviders)
     setAccounts(accountList)
+    if (!providerId) {
+      const preferredProvider = mergedProviders.find((provider) =>
+        provider.enabled && ['doubao', 'yuanbao'].includes(provider.id),
+      )
+      if (preferredProvider) {
+        setProviderId(preferredProvider.id)
+      }
+    }
   }
 
   const runAction = async (action: () => Promise<void>) => {
@@ -127,20 +155,66 @@ export function RpaLearning() {
     setPatch(null)
     const nextSession = await window.electronAPI.rpa.startLearning({
       targetId: selectedTargetId,
-      providerId: providerId || undefined,
-      accountId: accountId || undefined,
+      providerId: selectedProvider?.id,
+      accountId: selectedProvider ? accountId || undefined : undefined,
       prompt: prompt || undefined,
       timeoutMs: 120000,
     })
     setSession(nextSession)
   })
 
+  const startRecording = () => runAction(async () => {
+    setCaptured([])
+    setPatch(null)
+    setReport(null)
+    setAutomationSteps([])
+    const nextSession = await window.electronAPI.rpa.startRecording({
+      providerId: selectedProvider?.id,
+      accountId: selectedProvider ? accountId || undefined : undefined,
+      providerUrl: selectedProvider ? undefined : providerUrl || undefined,
+      browser,
+      port,
+      timeoutMs: 300000,
+    })
+    setSession(nextSession)
+  })
+
+  const startAutoLearning = () => runAction(async () => {
+    setCaptured([])
+    setPatch(null)
+    setReport(null)
+    setAutomationSteps([])
+    const nextSession = await window.electronAPI.rpa.startAutoLearning({
+      targetId: selectedTargetId,
+      providerId: selectedProvider?.id,
+      accountId: selectedProvider ? accountId || undefined : undefined,
+      prompt: prompt || undefined,
+      timeoutMs: 180000,
+      answerTimeoutMs: 140000,
+      shareTimeoutMs: 45000,
+      share: true,
+    })
+    setSession(nextSession)
+    setAutomationSteps(nextSession.result?.automationSteps || [])
+  })
+
   const stopLearning = () => runAction(async () => {
-    await window.electronAPI.rpa.cancelLearning()
-    if (session) {
-      const nextSession = await window.electronAPI.rpa.getSession(session.id)
-      setSession(nextSession || session)
-    }
+    const nextSession = await window.electronAPI.rpa.stopLearning()
+    setSession(nextSession || session)
+  })
+
+  const generateReport = () => runAction(async () => {
+    if (!session) return
+    const nextReport = await window.electronAPI.rpa.generateReport(session.id)
+    setReport(nextReport)
+    const nextSession = await window.electronAPI.rpa.getSession(session.id)
+    setSession(nextSession || session)
+  })
+
+  const copyReport = () => runAction(async () => {
+    const currentReport = report || session?.report
+    if (!currentReport) return
+    await navigator.clipboard.writeText(currentReport.markdown)
   })
 
   const generatePatch = () => runAction(async () => {
@@ -163,6 +237,9 @@ export function RpaLearning() {
 
   const selectedTarget = targets.find((target) => target.id === selectedTargetId)
   const findings = session?.result?.findings || []
+  const shownAutomationSteps = session?.result?.automationSteps || automationSteps
+  const isCapturing = session?.status === 'capturing'
+  const shownReport = report || session?.report || null
 
   return (
     <div className="space-y-6">
@@ -188,12 +265,150 @@ export function RpaLearning() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <Plug className="h-4 w-4" />
-              {t('rpa.browser')}
+              <Play className="h-4 w-4" />
+              {t('rpa.recording')}
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <Label htmlFor="rpa-provider">{t('rpa.providerReference')}</Label>
+              <Select value={selectedProvider ? providerId : 'none'} onValueChange={(value) => {
+                const nextProviderId = value === 'none' ? '' : value
+                setProviderId(nextProviderId)
+                setAccountId('')
+                if (nextProviderId) {
+                  setProviderUrl('')
+                }
+              }}>
+                <SelectTrigger id="rpa-provider">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">{t('rpa.noReference')}</SelectItem>
+                  {providers.map((provider) => (
+                    <SelectItem key={provider.id} value={provider.id}>
+                      {provider.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {!selectedProvider && (
+              <div className="space-y-2">
+                <Label htmlFor="rpa-provider-url">{t('rpa.providerUrl')}</Label>
+                <Input
+                  id="rpa-provider-url"
+                  value={providerUrl}
+                  onChange={(event) => setProviderUrl(event.target.value)}
+                  placeholder={t('rpa.providerUrlPlaceholder')}
+                />
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="rpa-account">{t('rpa.accountReference')}</Label>
+              <Select
+                value={accountId || 'none'}
+                onValueChange={(value) => setAccountId(value === 'none' ? '' : value)}
+                disabled={!selectedProvider}
+              >
+                <SelectTrigger id="rpa-account">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">{t('rpa.noReference')}</SelectItem>
+                  {providerAccounts.map((account) => (
+                    <SelectItem key={account.id} value={account.id}>
+                      {account.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <Button
+              className="w-full"
+              onClick={startRecording}
+              disabled={isBusy || isCapturing || (!selectedProvider && !providerUrl.trim())}
+            >
+              {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+              <span>{t('rpa.startRecording')}</span>
+            </Button>
+
+            <div className="grid gap-3">
+              <Metric label={t('rpa.status')} value={session?.status || 'idle'} />
+              <Metric label={t('rpa.captured')} value={String(captured.length || session?.capturedCount || 0)} />
+              <Metric label={t('rpa.confidence')} value={patch ? `${patch.confidence}%` : '-'} />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FileText className="h-4 w-4" />
+              {t('rpa.analysis')}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={stopLearning} disabled={!isCapturing}>
+                <Square className="h-4 w-4" />
+                <span>{t('rpa.stopAndAnalyze')}</span>
+              </Button>
+              <Button variant="outline" onClick={generateReport} disabled={!session || isCapturing || isBusy}>
+                <FileText className="h-4 w-4" />
+                <span>{t('rpa.generateReport')}</span>
+              </Button>
+              <Button variant="outline" onClick={copyReport} disabled={!shownReport || isBusy}>
+                <Clipboard className="h-4 w-4" />
+                <span>{t('rpa.copyReport')}</span>
+              </Button>
+            </div>
+            <div className="grid gap-3 md:grid-cols-3">
+              <Metric label={t('rpa.status')} value={session?.status || 'idle'} />
+              <Metric label={t('rpa.captured')} value={String(captured.length || session?.capturedCount || 0)} />
+              <Metric label={t('rpa.findings')} value={String(findings.length)} />
+            </div>
+            {shownReport ? (
+              <pre className="max-h-80 overflow-auto rounded-md border bg-muted/30 p-4 text-xs">
+                {shownReport.markdown}
+              </pre>
+            ) : (
+              <EmptyState text={t('rpa.noReport')} />
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center justify-between text-base">
+            <button
+              type="button"
+              className="flex items-center gap-2"
+              onClick={() => setAdvancedOpen((open) => !open)}
+            >
+              <Plug className="h-4 w-4" />
+              <span>{t('rpa.advancedMode')}</span>
+            </button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setAdvancedOpen((open) => !open)}
+              aria-label={t('rpa.advancedMode')}
+              title={t('rpa.advancedMode')}
+            >
+              {advancedOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            </Button>
+          </CardTitle>
+        </CardHeader>
+        {advancedOpen && (
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">
                 <Label htmlFor="rpa-browser">{t('rpa.browser')}</Label>
                 <Select value={browser} onValueChange={(value) => setBrowser(value as RpaBrowser)}>
@@ -267,93 +482,37 @@ export function RpaLearning() {
                 </div>
               )}
             </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Bot className="h-4 w-4" />
-              {t('rpa.learning')}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid gap-3 md:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="rpa-provider">{t('rpa.providerReference')}</Label>
-                <Select value={providerId || 'none'} onValueChange={(value) => {
-                  setProviderId(value === 'none' ? '' : value)
-                  setAccountId('')
-                }}>
-                  <SelectTrigger id="rpa-provider">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">{t('rpa.noReference')}</SelectItem>
-                    {providers.map((provider) => (
-                      <SelectItem key={provider.id} value={provider.id}>
-                        {provider.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="rpa-account">{t('rpa.accountReference')}</Label>
-                <Select value={accountId || 'none'} onValueChange={(value) => setAccountId(value === 'none' ? '' : value)}>
-                  <SelectTrigger id="rpa-account">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">{t('rpa.noReference')}</SelectItem>
-                    {providerAccounts.map((account) => (
-                      <SelectItem key={account.id} value={account.id}>
-                        {account.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <div className="flex flex-wrap gap-2">
+                  <Button onClick={startLearning} disabled={!selectedTargetId || isBusy || isCapturing}>
+                    <Play className="h-4 w-4" />
+                    <span>{t('rpa.start')}</span>
+                  </Button>
+                  <Button onClick={startAutoLearning} disabled={!selectedTargetId || isBusy || isCapturing}>
+                    <Bot className="h-4 w-4" />
+                    <span>{t('rpa.autoRun')}</span>
+                  </Button>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="rpa-prompt">{t('rpa.prompt')}</Label>
+                  <Textarea
+                    id="rpa-prompt"
+                    value={prompt}
+                    onChange={(event) => setPrompt(event.target.value)}
+                    placeholder={t('rpa.promptPlaceholder')}
+                    rows={3}
+                  />
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {t('rpa.advancedHint')}
+                </div>
+                <AutomationTimeline steps={shownAutomationSteps} emptyText={t('rpa.noTimeline')} />
               </div>
             </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="rpa-prompt">{t('rpa.prompt')}</Label>
-              <Textarea
-                id="rpa-prompt"
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                placeholder={t('rpa.promptPlaceholder')}
-                rows={3}
-              />
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              <Button onClick={startLearning} disabled={!selectedTargetId || isBusy || session?.status === 'capturing'}>
-                <Play className="h-4 w-4" />
-                <span>{t('rpa.start')}</span>
-              </Button>
-              <Button variant="outline" onClick={stopLearning} disabled={isBusy}>
-                <Square className="h-4 w-4" />
-                <span>{t('rpa.stop')}</span>
-              </Button>
-              <Button variant="outline" onClick={generatePatch} disabled={!session || isBusy}>
-                <Wand2 className="h-4 w-4" />
-                <span>{t('rpa.generatePatch')}</span>
-              </Button>
-              <Button onClick={applyPatch} disabled={!patch?.canApply || isBusy}>
-                <FileCode className="h-4 w-4" />
-                <span>{t('rpa.applyPatch')}</span>
-              </Button>
-            </div>
-
-            <div className="grid gap-3 md:grid-cols-3">
-              <Metric label={t('rpa.status')} value={session?.status || 'idle'} />
-              <Metric label={t('rpa.captured')} value={String(captured.length || session?.capturedCount || 0)} />
-              <Metric label={t('rpa.confidence')} value={patch ? `${patch.confidence}%` : '-'} />
-            </div>
           </CardContent>
-        </Card>
-      </div>
+        )}
+      </Card>
 
       <Tabs defaultValue="findings">
         <TabsList>
@@ -362,6 +521,7 @@ export function RpaLearning() {
             {t('rpa.findings')}
           </TabsTrigger>
           <TabsTrigger value="requests">{t('rpa.requests')}</TabsTrigger>
+          <TabsTrigger value="report">{t('rpa.report')}</TabsTrigger>
           <TabsTrigger value="patch">{t('rpa.patch')}</TabsTrigger>
         </TabsList>
         <TabsContent value="findings" className="mt-4">
@@ -409,11 +569,31 @@ export function RpaLearning() {
             ))}
           </div>
         </TabsContent>
-        <TabsContent value="patch" className="mt-4">
-          {!patch ? (
-            <EmptyState text={t('rpa.noPatch')} />
+        <TabsContent value="report" className="mt-4">
+          {!shownReport ? (
+            <EmptyState text={t('rpa.noReport')} />
           ) : (
-            <div className="space-y-4">
+            <pre className="max-h-[680px] overflow-auto rounded-md border p-4 text-xs">
+              {shownReport.markdown}
+            </pre>
+          )}
+        </TabsContent>
+        <TabsContent value="patch" className="mt-4">
+          <div className="space-y-4">
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={generatePatch} disabled={!session || isBusy}>
+                <Wand2 className="h-4 w-4" />
+                <span>{t('rpa.generatePatch')}</span>
+              </Button>
+              <Button onClick={applyPatch} disabled={!patch?.canApply || isBusy}>
+                <FileCode className="h-4 w-4" />
+                <span>{t('rpa.applyPatch')}</span>
+              </Button>
+            </div>
+            {!patch ? (
+              <EmptyState text={t('rpa.noPatch')} />
+            ) : (
+              <>
               <div className="flex items-center gap-2 rounded-md border p-4">
                 <CheckCircle className="h-5 w-5 text-emerald-600" />
                 <div>
@@ -431,12 +611,19 @@ export function RpaLearning() {
                   </pre>
                 </div>
               ))}
-            </div>
-          )}
+              </>
+            )}
+          </div>
         </TabsContent>
       </Tabs>
     </div>
   )
+}
+
+function mergeProviderReferences(configuredProviders: Provider[], builtinProviders: Provider[]): Provider[] {
+  const configuredIds = new Set(configuredProviders.map((provider) => provider.id))
+  const missingBuiltinProviders = builtinProviders.filter((provider) => !configuredIds.has(provider.id))
+  return [...configuredProviders, ...missingBuiltinProviders]
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
@@ -448,12 +635,60 @@ function Metric({ label, value }: { label: string; value: string }) {
   )
 }
 
+function AutomationTimeline({
+  steps,
+  emptyText,
+}: {
+  steps: RpaAutomationStepResult[]
+  emptyText: string
+}) {
+  if (steps.length === 0) {
+    return <EmptyState text={emptyText} />
+  }
+
+  return (
+    <div className="space-y-3">
+      {steps.map((step) => (
+        <div key={step.step} className="flex gap-3 rounded-md border px-4 py-3">
+          <div className={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${step.success ? 'bg-emerald-500' : 'bg-destructive'}`} />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="text-sm font-medium">{step.step}</div>
+              {typeof step.confidence === 'number' && (
+                <span className="rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                  {step.confidence}%
+                </span>
+              )}
+            </div>
+            <div className="mt-1 text-sm text-muted-foreground">{step.message}</div>
+            {step.targetLabel && (
+              <div className="mt-1 break-all text-xs text-muted-foreground">{step.targetLabel}</div>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function EmptyState({ text }: { text: string }) {
   return (
     <div className="rounded-md border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
       {text}
     </div>
   )
+}
+
+function upsertStep(
+  current: RpaAutomationStepResult[],
+  next: RpaAutomationStepResult,
+): RpaAutomationStepResult[] {
+  const index = current.findIndex((step) => step.step === next.step)
+  if (index === -1) {
+    return [...current, next]
+  }
+
+  return current.map((step, itemIndex) => itemIndex === index ? next : step)
 }
 
 export default RpaLearning

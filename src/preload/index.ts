@@ -24,9 +24,13 @@ import type {
   RpaCapturedRequest,
   RpaConnectBrowserOptions,
   RpaLaunchBrowserOptions,
+  RpaAutoLearnProviderOptions,
+  RpaAnalysisReport,
   RpaLearningSessionSummary,
   RpaPatchPreview,
   RpaProgressEvent,
+  RpaStartRecordingOptions,
+  RpaStartAutoLearningOptions,
   RpaStartLearningOptions,
   RpaTarget,
 } from '../shared/rpa'
@@ -743,11 +747,26 @@ const rpaAPI = {
   startLearning: (options: RpaStartLearningOptions): Promise<RpaLearningSessionSummary> =>
     ipcRenderer.invoke(IpcChannels.RPA_START_LEARNING, options),
 
+  startRecording: (options: RpaStartRecordingOptions): Promise<RpaLearningSessionSummary> =>
+    ipcRenderer.invoke(IpcChannels.RPA_START_RECORDING, options),
+
+  startAutoLearning: (options: RpaStartAutoLearningOptions): Promise<RpaLearningSessionSummary> =>
+    ipcRenderer.invoke(IpcChannels.RPA_START_AUTO_LEARNING, options),
+
+  autoLearnProvider: (options: RpaAutoLearnProviderOptions): Promise<RpaLearningSessionSummary> =>
+    ipcRenderer.invoke(IpcChannels.RPA_AUTO_LEARN_PROVIDER, options),
+
   cancelLearning: (): Promise<boolean> =>
     ipcRenderer.invoke(IpcChannels.RPA_CANCEL_LEARNING),
 
+  stopLearning: (): Promise<RpaLearningSessionSummary | undefined> =>
+    ipcRenderer.invoke(IpcChannels.RPA_STOP_LEARNING),
+
   getSession: (sessionId: string): Promise<RpaLearningSessionSummary | undefined> =>
     ipcRenderer.invoke(IpcChannels.RPA_GET_SESSION, sessionId),
+
+  generateReport: (sessionId: string): Promise<RpaAnalysisReport> =>
+    ipcRenderer.invoke(IpcChannels.RPA_GENERATE_REPORT, sessionId),
 
   generatePatch: (sessionId: string): Promise<RpaPatchPreview> =>
     ipcRenderer.invoke(IpcChannels.RPA_GENERATE_PATCH, sessionId),

@@ -3,9 +3,13 @@ import type {
   RpaCapturedRequest,
   RpaConnectBrowserOptions,
   RpaLaunchBrowserOptions,
+  RpaAutoLearnProviderOptions,
+  RpaAnalysisReport,
   RpaLearningSessionSummary,
   RpaPatchPreview,
   RpaProgressEvent,
+  RpaStartRecordingOptions,
+  RpaStartAutoLearningOptions,
   RpaStartLearningOptions,
   RpaTarget,
 } from '../../../shared/rpa'
@@ -216,8 +220,13 @@ interface RpaAPI {
   connectBrowser: (options?: RpaConnectBrowserOptions) => Promise<RpaBrowserConnection>
   listTargets: () => Promise<RpaTarget[]>
   startLearning: (options: RpaStartLearningOptions) => Promise<RpaLearningSessionSummary>
+  startRecording: (options: RpaStartRecordingOptions) => Promise<RpaLearningSessionSummary>
+  startAutoLearning: (options: RpaStartAutoLearningOptions) => Promise<RpaLearningSessionSummary>
+  autoLearnProvider: (options: RpaAutoLearnProviderOptions) => Promise<RpaLearningSessionSummary>
   cancelLearning: () => Promise<boolean>
+  stopLearning: () => Promise<RpaLearningSessionSummary | undefined>
   getSession: (sessionId: string) => Promise<RpaLearningSessionSummary | undefined>
+  generateReport: (sessionId: string) => Promise<RpaAnalysisReport>
   generatePatch: (sessionId: string) => Promise<RpaPatchPreview>
   applyPatch: (sessionId: string) => Promise<RpaPatchPreview>
   onProgress: (callback: (event: RpaProgressEvent) => void) => () => void
