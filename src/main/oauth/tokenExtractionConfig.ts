@@ -51,6 +51,36 @@ export const TOKEN_EXTRACTION_CONFIGS: Record<ProviderType, TokenExtractionConfi
     windowTitle: 'DeepSeek Login',
   },
 
+  doubao: {
+    loginUrl: 'https://www.doubao.com/chat/',
+    tokenSources: [
+      {
+        type: 'cookie',
+        key: 'sessionid',
+      },
+    ],
+    targetDomains: ['.doubao.com', 'doubao.com', 'www.doubao.com'],
+    successUrlPatterns: [/doubao\.com/i],
+    windowTitle: 'Doubao Login',
+  },
+
+  yuanbao: {
+    loginUrl: 'https://yuanbao.tencent.com/chat/naQivTmsDa',
+    tokenSources: [
+      {
+        type: 'cookie',
+        key: 'hy_user',
+      },
+      {
+        type: 'cookie',
+        key: 'hy_token',
+      },
+    ],
+    targetDomains: ['.yuanbao.tencent.com', 'yuanbao.tencent.com', '.tencent.com', 'tencent.com'],
+    successUrlPatterns: [/yuanbao\.tencent\.com/i],
+    windowTitle: 'Yuanbao Login',
+  },
+
   glm: {
     loginUrl: 'https://chatglm.cn',
     tokenSources: [

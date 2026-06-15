@@ -13,6 +13,10 @@ import { storeManager } from '../store/store'
 import { DeepSeekAdapter } from './adapters/deepseek'
 import type { DeepSeekMessageId, DeepSeekShareInfo } from './adapters/deepseek'
 import { DeepSeekStreamHandler } from './adapters/deepseek-stream'
+import { DoubaoAdapter } from './adapters/doubao'
+import { DoubaoStreamHandler } from './adapters/doubao-stream'
+import { YuanbaoAdapter } from './adapters/yuanbao'
+import { YuanbaoStreamHandler } from './adapters/yuanbao-stream'
 import { GLMAdapter, GLMStreamHandler } from './adapters/glm'
 import { KimiAdapter, KimiStreamHandler } from './adapters/kimi'
 import { MimoAdapter, MimoStreamHandler } from './adapters/mimo'
@@ -77,6 +81,18 @@ export class RequestForwarder {
       matches: DeepSeekAdapter.isDeepSeekProvider,
       forward: (request, account, provider, actualModel, startTime, outboundProxy) =>
         this.forwardDeepSeek(request, account, provider, actualModel, startTime, outboundProxy),
+    },
+    {
+      name: 'doubao',
+      matches: DoubaoAdapter.isDoubaoProvider,
+      forward: (request, account, provider, actualModel, startTime, outboundProxy) =>
+        this.forwardDoubao(request, account, provider, actualModel, startTime, outboundProxy),
+    },
+    {
+      name: 'yuanbao',
+      matches: YuanbaoAdapter.isYuanbaoProvider,
+      forward: (request, account, provider, actualModel, startTime, outboundProxy) =>
+        this.forwardYuanbao(request, account, provider, actualModel, startTime, outboundProxy),
     },
     {
       name: 'glm',
@@ -1444,6 +1460,150 @@ export class RequestForwarder {
     } catch (error) {
       const latency = Date.now() - startTime
       console.error('[Mimo] Forward error:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        latency,
+        failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown',
+      }
+    }
+  }
+
+  /**
+   * Doubao Dedicated Forward
+   * Uses an Electron hidden page because Doubao signs requests in browser JS.
+   */
+  private async forwardDoubao(
+    request: ChatCompletionRequest,
+    account: Account,
+    provider: Provider,
+    actualModel: string,
+    startTime: number,
+    outboundProxy?: OutboundProxyContext
+  ): Promise<ForwardResult> {
+    console.log('[forwardDoubao] actualModel:', actualModel)
+    try {
+      const transformed = this.transformRequestForPromptToolUse(request, provider)
+      const modelForMode = `${request.originalModel || ''} ${request.model || ''} ${actualModel || ''}`.toLowerCase()
+      const enableThinking = Boolean(
+        request.reasoning_effort
+        || request.reasoningEffort
+        || modelForMode.includes('think')
+        || modelForMode.includes('reason')
+        || modelForMode.includes('r1')
+      )
+      const adapter = new DoubaoAdapter(provider, account, outboundProxy)
+      const { stream, sessionId, metadata } = await adapter.chatCompletion({
+        model: actualModel,
+        messages: transformed.messages as any,
+        stream: request.stream,
+        temperature: request.temperature,
+        enableThinking,
+      })
+
+      const latency = Date.now() - startTime
+      const deleteSessionCallback = shouldDeleteSession()
+        ? async () => {
+            try {
+              await adapter.deleteSession(sessionId)
+            } catch (error) {
+              console.error('[Doubao] Failed to delete session:', error)
+            }
+          }
+        : undefined
+
+      if (request.stream === true) {
+        const handler = new DoubaoStreamHandler(actualModel, sessionId, deleteSessionCallback, metadata)
+        const transformedStream = await handler.handleStream(stream)
+
+        return {
+          success: true,
+          status: 200,
+          headers: {},
+          stream: transformedStream,
+          skipTransform: true,
+          latency,
+          providerSessionId: sessionId,
+        }
+      }
+
+      const handler = new DoubaoStreamHandler(actualModel, sessionId, undefined, metadata)
+      const result = await handler.handleNonStream(stream)
+      this.applyToolCallsToResponse(result, transformed)
+
+      if (deleteSessionCallback) {
+        await deleteSessionCallback()
+      }
+
+      return {
+        success: true,
+        status: 200,
+        headers: {},
+        body: result,
+        latency,
+        providerSessionId: sessionId,
+      }
+    } catch (error) {
+      const latency = Date.now() - startTime
+      console.error('[Doubao] Forward error:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        latency,
+        failureType: outboundProxy && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown',
+      }
+    }
+  }
+
+  private async forwardYuanbao(
+    request: ChatCompletionRequest,
+    account: Account,
+    provider: Provider,
+    actualModel: string,
+    startTime: number,
+    outboundProxy?: OutboundProxyContext
+  ): Promise<ForwardResult> {
+    try {
+      const transformed = this.transformRequestForPromptToolUse(request, provider)
+      const semanticModel = `${request.originalModel || ''} ${request.model || ''} ${actualModel || ''}`.toLowerCase()
+      const enableThinking = Boolean(
+        request.reasoning_effort || request.reasoningEffort || semanticModel.includes('think')
+        || semanticModel.includes('reason') || semanticModel.includes('r1') || semanticModel.includes('t1')
+      )
+      const webSearch = Boolean(request.web_search || semanticModel.includes('search'))
+      const adapter = new YuanbaoAdapter(provider, account, outboundProxy)
+      const { response, sessionId, metadataProvider } = await adapter.chatCompletion({
+        model: actualModel,
+        originalModel: request.originalModel || request.model,
+        messages: transformed.messages as any,
+        webSearch,
+        enableThinking,
+      })
+      const latency = Date.now() - startTime
+
+      if (response.status >= 400) {
+        return { success: false, status: response.status, error: `Yuanbao HTTP ${response.status}`, latency, failureType: 'provider' }
+      }
+
+      const deleteCallback = shouldDeleteSession() ? () => adapter.deleteSession(sessionId) : undefined
+      const handler = new YuanbaoStreamHandler(actualModel, sessionId, metadataProvider, deleteCallback)
+      if (request.stream === true) {
+        return {
+          success: true, status: response.status, headers: this.extractHeaders(response.headers),
+          stream: await handler.handleStream(response.data), skipTransform: true, latency, providerSessionId: sessionId,
+        }
+      }
+
+      const result = await handler.handleNonStream(response.data)
+      this.applyToolCallsToResponse(result, transformed)
+      await deleteCallback?.()
+      return {
+        success: true, status: response.status, headers: this.extractHeaders(response.headers),
+        body: result, latency, providerSessionId: sessionId,
+      }
+    } catch (error) {
+      const latency = Date.now() - startTime
+      console.error('[Yuanbao] Forward error:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',

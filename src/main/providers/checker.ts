@@ -132,6 +132,10 @@ export class ProviderChecker {
     switch (provider.id) {
       case 'deepseek':
         return this.checkDeepSeekToken(account.credentials.token)
+      case 'doubao':
+        return this.checkDoubaoToken(account.credentials.sessionid || account.credentials.sessionId, account.credentials.cookie)
+      case 'yuanbao':
+        return this.checkYuanbaoToken(account.credentials)
       case 'glm':
         return this.checkGLMToken(account.credentials.refresh_token)
       case 'kimi':
@@ -159,6 +163,53 @@ export class ProviderChecker {
         }
         return this.checkGenericToken(builtinConfig, account)
     }
+  }
+
+  private static checkDoubaoToken(sessionid: string, cookie: string): TokenCheckResult {
+    const sessionIdFromCookie = this.extractCookieValue(cookie, 'sessionid')
+    const resolvedSessionId = sessionid || sessionIdFromCookie
+
+    if (!resolvedSessionId) {
+      return { valid: false, error: 'Missing required credential: sessionid' }
+    }
+
+    if (resolvedSessionId.length < 16) {
+      return { valid: false, error: 'sessionid appears to be invalid (too short)' }
+    }
+
+    return {
+      valid: true,
+      userInfo: {
+        name: 'Doubao User',
+      },
+    }
+  }
+
+  private static checkYuanbaoToken(credentials: Record<string, string>): TokenCheckResult {
+    const cookie = credentials.cookie || ''
+    const hyUser = credentials.hy_user || this.extractCookieValue(cookie, 'hy_user')
+    const hyToken = credentials.hy_token || this.extractCookieValue(cookie, 'hy_token')
+    const xUskey = credentials.x_uskey || credentials.xUskey || credentials['x-uskey']
+
+    if (!cookie && !hyUser && !hyToken && !xUskey) {
+      return { valid: false, error: 'Missing Yuanbao credentials: Cookie, hy_user, hy_token, or x-uskey' }
+    }
+
+    return {
+      valid: true,
+      userInfo: {
+        name: 'Yuanbao User',
+      },
+    }
+  }
+
+  private static extractCookieValue(cookieHeader: string | undefined, name: string): string {
+    if (!cookieHeader) return ''
+    const pair = cookieHeader
+      .split(';')
+      .map(part => part.trim())
+      .find(part => part.startsWith(`${name}=`))
+    return pair ? pair.slice(name.length + 1) : ''
   }
 
   private static checkMimoToken(

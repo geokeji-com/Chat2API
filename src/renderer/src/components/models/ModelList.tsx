@@ -34,9 +34,13 @@ import perplexityIcon from '@/assets/providers/perplexity.svg'
 import qwenIcon from '@/assets/providers/qwen.svg'
 import zaiIcon from '@/assets/providers/zai.svg'
 import modelMappingIcon from '@/assets/providers/model-mapping.svg'
+import doubaoIcon from '@/assets/providers/doubao.png'
+import yuanbaoIcon from '@/assets/providers/yuanbao.png'
 
 const providerIcons: Record<string, string> = {
   deepseek: deepseekIcon,
+  doubao: doubaoIcon,
+  yuanbao: yuanbaoIcon,
   glm: glmIcon,
   kimi: kimiIcon,
   minimax: minimaxIcon,

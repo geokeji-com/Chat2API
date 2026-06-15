@@ -1,0 +1,75 @@
+import type { BuiltinProviderConfig } from '../../store/types'
+
+export const yuanbaoConfig: BuiltinProviderConfig = {
+  id: 'yuanbao',
+  name: '元宝',
+  type: 'builtin',
+  authType: 'cookie',
+  apiEndpoint: 'https://yuanbao.tencent.com',
+  chatPath: '/api/chat',
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept': 'text/event-stream',
+    'Origin': 'https://yuanbao.tencent.com',
+    'Referer': 'https://yuanbao.tencent.com/chat/naQivTmsDa',
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+  },
+  enabled: true,
+  description: '元宝 web assistant for interface learning and browser-captured credentials',
+  supportedModels: [
+    'deepseek-v3',
+    'deepseek-r1',
+    'deepseek-v3-search',
+    'deepseek-r1-search',
+    'hunyuan',
+    'hunyuan-t1',
+    'hunyuan-search',
+    'hunyuan-t1-search',
+  ],
+  modelMappings: {
+    'deepseek-v3': 'deepseek-v3',
+    'deepseek-r1': 'deepseek-r1',
+    'deepseek-v3-search': 'deepseek-v3-search',
+    'deepseek-r1-search': 'deepseek-r1-search',
+    hunyuan: 'hunyuan',
+    'hunyuan-t1': 'hunyuan-t1',
+    'hunyuan-search': 'hunyuan-search',
+    'hunyuan-t1-search': 'hunyuan-t1-search',
+  },
+  credentialFields: [
+    {
+      name: 'cookie',
+      label: 'Full Cookie',
+      type: 'textarea',
+      required: true,
+      placeholder: 'Paste the full Cookie header from yuanbao.tencent.com requests',
+      helpText: 'Open Yuanbao in a browser, send one message, then copy the request Cookie header from DevTools Network.',
+    },
+    {
+      name: 'hy_user',
+      label: 'hy_user',
+      type: 'text',
+      required: false,
+      placeholder: 'Optional hy_user value',
+      helpText: 'Optional. Fill from Yuanbao Cookie if the learned protocol requires it.',
+    },
+    {
+      name: 'hy_token',
+      label: 'hy_token',
+      type: 'password',
+      required: false,
+      placeholder: 'Optional hy_token value',
+      helpText: 'Optional. Fill from Yuanbao Cookie if the learned protocol requires it.',
+    },
+    {
+      name: 'x_uskey',
+      label: 'x-uskey',
+      type: 'password',
+      required: false,
+      placeholder: 'Optional x-uskey request header',
+      helpText: 'Optional. Interface learning reports can identify whether this dynamic request header is required.',
+    },
+  ],
+}
+
+export default yuanbaoConfig

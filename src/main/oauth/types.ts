@@ -140,6 +140,26 @@ export const MANUAL_TOKEN_CONFIGS: Record<ProviderType, ManualTokenConfig[]> = {
       helpUrl: 'https://chat.deepseek.com',
     },
   ],
+  doubao: [
+    {
+      providerType: 'doubao',
+      tokenType: 'cookie',
+      label: 'sessionid',
+      placeholder: 'Enter the sessionid cookie value from doubao.com',
+      description: 'Open browser Developer Tools on doubao.com, then find sessionid in Application > Cookies',
+      helpUrl: 'https://www.doubao.com/chat/',
+    },
+  ],
+  yuanbao: [
+    {
+      providerType: 'yuanbao',
+      tokenType: 'cookie',
+      label: 'Full Cookie',
+      placeholder: 'Paste Cookie header from yuanbao.tencent.com requests',
+      description: 'Open Yuanbao, send one message, then copy Cookie/hy_user/hy_token from the chat request',
+      helpUrl: 'https://yuanbao.tencent.com/chat/naQivTmsDa',
+    },
+  ],
   glm: [
     {
       providerType: 'glm',

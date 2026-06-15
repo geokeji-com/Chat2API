@@ -50,7 +50,7 @@ export const qwenAiConfig: BuiltinProviderConfig = {
       type: 'textarea',
       required: false,
       placeholder: 'Optional cookies for enhanced compatibility',
-      helpText: 'Full cookie string from browser DevTools (optional but recommended)',
+      helpText: 'Full Cookie header from chat.qwen.ai browser requests. Recommended because the web API may reject token-only requests.',
     },
   ],
 }

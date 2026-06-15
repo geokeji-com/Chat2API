@@ -25,6 +25,8 @@ import minimaxIcon from '@/assets/providers/minimax.svg'
 import perplexityIcon from '@/assets/providers/perplexity.svg'
 import qwenIcon from '@/assets/providers/qwen.svg'
 import zaiIcon from '@/assets/providers/zai.svg'
+import doubaoIcon from '@/assets/providers/doubao.png'
+import yuanbaoIcon from '@/assets/providers/yuanbao.png'
 
 interface AddProviderDialogProps {
   open: boolean
@@ -46,6 +48,8 @@ interface AddProviderDialogProps {
 
 const providerIcons: Record<string, string> = {
   deepseek: deepseekIcon,
+  doubao: doubaoIcon,
+  yuanbao: yuanbaoIcon,
   glm: glmIcon,
   kimi: kimiIcon,
   mimo: mimoIcon,

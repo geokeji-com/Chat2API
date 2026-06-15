@@ -38,7 +38,7 @@ export const qwenConfig: BuiltinProviderConfig = {
       type: 'password',
       required: true,
       placeholder: 'Enter tongyi_sso_ticket',
-      helpText: 'SSO ticket obtained from www.qianwen.com, found in browser DevTools Application -> Cookies as tongyi_sso_ticket',
+      helpText: 'Required. Copy the tongyi_sso_ticket cookie value from www.qianwen.com; the full Cookie field below only supplements this value.',
     },
     {
       name: 'cookie',
@@ -46,7 +46,7 @@ export const qwenConfig: BuiltinProviderConfig = {
       type: 'textarea',
       required: false,
       placeholder: 'Optional full Cookie header from www.qianwen.com',
-      helpText: 'Optional. Use this when tongyi_sso_ticket alone is rejected by Qianwen web API.',
+      helpText: 'Optional full Cookie header from Qianwen web requests. Use it when tongyi_sso_ticket alone is rejected by the web API.',
     },
     {
       name: 'csrfToken',

@@ -76,6 +76,62 @@ function mapOAuthCredentials(providerId: string | undefined, credentials: Record
     return Object.keys(mapped).length > 0 ? mapped : credentials
   }
 
+  if (providerId === 'doubao') {
+    const mapped: Record<string, string> = {}
+    const sessionid = credentials.sessionid || credentials.sessionId
+    if (sessionid) {
+      mapped.sessionid = sessionid
+    }
+
+    const rawCookies = (credentials as any).cookies
+    if (typeof rawCookies === 'string' && rawCookies.trim()) {
+      mapped.cookie = rawCookies
+    } else if (rawCookies && typeof rawCookies === 'object') {
+      mapped.cookie = Object.entries(rawCookies)
+        .filter((entry): entry is [string, string] =>
+          typeof entry[0] === 'string'
+          && typeof entry[1] === 'string'
+          && entry[0].length > 0
+          && entry[1].length > 0
+        )
+        .map(([key, value]) => `${key}=${value}`)
+        .join('; ')
+    }
+
+    return Object.keys(mapped).length > 0 ? mapped : credentials
+  }
+
+  if (providerId === 'yuanbao') {
+    const mapped: Record<string, string> = {}
+    const rawCookies = (credentials as any).cookies
+    if (typeof rawCookies === 'string' && rawCookies.trim()) {
+      mapped.cookie = rawCookies
+    } else if (rawCookies && typeof rawCookies === 'object') {
+      mapped.cookie = Object.entries(rawCookies)
+        .filter((entry): entry is [string, string] =>
+          typeof entry[0] === 'string'
+          && typeof entry[1] === 'string'
+          && entry[0].length > 0
+          && entry[1].length > 0
+        )
+        .map(([key, value]) => `${key}=${value}`)
+        .join('; ')
+    }
+
+    if (credentials.hy_user) {
+      mapped.hy_user = credentials.hy_user
+    }
+    if (credentials.hy_token) {
+      mapped.hy_token = credentials.hy_token
+    }
+    const xUskey = credentials.x_uskey || credentials.xUskey || credentials['x-uskey']
+    if (xUskey) {
+      mapped.x_uskey = xUskey
+    }
+
+    return Object.keys(mapped).length > 0 ? mapped : credentials
+  }
+
   const credentialKeyMap: Record<string, string> = {
     'glm': 'chatglm_refresh_token',
     'deepseek': 'userToken',
@@ -208,7 +264,7 @@ export function AddAccountDialog({
   const isEditing = !!editingAccount
   const builtinProvider = provider as BuiltinProviderConfig | null
   const credentialFields: CredentialField[] = builtinProvider?.credentialFields || getDefaultCredentialFields(provider?.authType, t)
-  const supportsOAuth = provider && ['deepseek', 'glm', 'kimi', 'mimo', 'minimax', 'qwen', 'qwen-ai', 'zai', 'perplexity'].includes(provider.id)
+  const supportsOAuth = provider && ['deepseek', 'doubao', 'yuanbao', 'glm', 'kimi', 'mimo', 'minimax', 'qwen', 'qwen-ai', 'zai', 'perplexity'].includes(provider.id)
 
   useEffect(() => {
     if (open) {
@@ -384,8 +440,8 @@ export function AddAccountDialog({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-[500px]">
-          <DialogHeader>
+        <DialogContent className="max-h-[85vh] overflow-hidden p-0 sm:max-w-[500px] flex flex-col">
+          <DialogHeader className="shrink-0 px-6 pt-6 pr-12">
             <DialogTitle className="flex items-center gap-2">
               <User className="h-5 w-5" />
               {isEditing ? t('providers.editAccount') : t('providers.addAccount')}
@@ -395,128 +451,130 @@ export function AddAccountDialog({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 mt-4">
-            <div className="space-y-2">
-              <Label htmlFor="name">{t('providers.accountName')} *</Label>
-              <Input
-                id="name"
-                placeholder={t('providers.accountNamePlaceholder')}
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </div>
+          <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="name">{t('providers.accountName')} *</Label>
+                <Input
+                  id="name"
+                  placeholder={t('providers.accountNamePlaceholder')}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="dailyLimit">{t('providers.dailyLimitOptional')}</Label>
-              <Input
-                id="dailyLimit"
-                type="number"
-                placeholder={t('providers.dailyLimitPlaceholder')}
-                value={dailyLimit}
-                onChange={(e) => setDailyLimit(e.target.value)}
-              />
-            </div>
+              <div className="space-y-2">
+                <Label htmlFor="dailyLimit">{t('providers.dailyLimitOptional')}</Label>
+                <Input
+                  id="dailyLimit"
+                  type="number"
+                  placeholder={t('providers.dailyLimitPlaceholder')}
+                  value={dailyLimit}
+                  onChange={(e) => setDailyLimit(e.target.value)}
+                />
+              </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="proxyMode">{t('providers.proxyMode')}</Label>
-              <Select value={proxyMode} onValueChange={(value) => setProxyMode(value as AccountProxyMode)}>
-                <SelectTrigger id="proxyMode">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">{t('providers.proxyModeNone')}</SelectItem>
-                  <SelectItem value="auto">{t('providers.proxyModeAuto')}</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">{t('providers.proxyModeHelp')}</p>
-            </div>
+              <div className="space-y-2">
+                <Label htmlFor="proxyMode">{t('providers.proxyMode')}</Label>
+                <Select value={proxyMode} onValueChange={(value) => setProxyMode(value as AccountProxyMode)}>
+                  <SelectTrigger id="proxyMode">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">{t('providers.proxyModeNone')}</SelectItem>
+                    <SelectItem value="auto">{t('providers.proxyModeAuto')}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t('providers.proxyModeHelp')}</p>
+              </div>
 
-            {supportsOAuth && !isEditing && (
-              <Tabs value={activeTab} onValueChange={setActiveTab}>
-                <TabsList className="grid w-full grid-cols-2">
-                  <TabsTrigger value="manual">{t('providers.manualInput')}</TabsTrigger>
-                  <TabsTrigger value="oauth">{t('providers.oauthLogin')}</TabsTrigger>
-                </TabsList>
+              {supportsOAuth && !isEditing && (
+                <Tabs value={activeTab} onValueChange={setActiveTab}>
+                  <TabsList className="grid w-full grid-cols-2">
+                    <TabsTrigger value="manual">{t('providers.manualInput')}</TabsTrigger>
+                    <TabsTrigger value="oauth">{t('providers.oauthLogin')}</TabsTrigger>
+                  </TabsList>
 
-                <TabsContent value="manual" className="mt-4">
-                  <CredentialFieldsForm
-                    fields={credentialFields}
-                    credentials={credentials}
-                    onChange={handleCredentialChange}
-                    t={t}
-                    providerId={provider?.id}
-                  />
-                </TabsContent>
+                  <TabsContent value="manual" className="mt-4">
+                    <CredentialFieldsForm
+                      fields={credentialFields}
+                      credentials={credentials}
+                      onChange={handleCredentialChange}
+                      t={t}
+                      providerId={provider?.id}
+                    />
+                  </TabsContent>
 
-                <TabsContent value="oauth" className="mt-4">
-                  <div className="flex flex-col items-center justify-center py-6 space-y-4">
-                    <div className="text-center">
-                      <p className="text-sm text-muted-foreground mb-4">
-                        {t('providers.clickToOpenOAuth')}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {t('providers.oauthAutoCapture')}
-                      </p>
-                    </div>
-                    <Button 
-                      onClick={handleOpenOAuthBrowser}
-                      disabled={isOAuthLoading}
-                    >
-                      {isOAuthLoading ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          {oauthStatus || t('providers.loggingIn')}
-                        </>
-                      ) : (
-                        <>
-                          <ExternalLink className="mr-2 h-4 w-4" />
-                          {t('providers.openOAuthLogin')}
-                        </>
+                  <TabsContent value="oauth" className="mt-4">
+                    <div className="flex flex-col items-center justify-center py-6 space-y-4">
+                      <div className="text-center">
+                        <p className="text-sm text-muted-foreground mb-4">
+                          {t('providers.clickToOpenOAuth')}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {t('providers.oauthAutoCapture')}
+                        </p>
+                      </div>
+                      <Button
+                        onClick={handleOpenOAuthBrowser}
+                        disabled={isOAuthLoading}
+                      >
+                        {isOAuthLoading ? (
+                          <>
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            {oauthStatus || t('providers.loggingIn')}
+                          </>
+                        ) : (
+                          <>
+                            <ExternalLink className="mr-2 h-4 w-4" />
+                            {t('providers.openOAuthLogin')}
+                          </>
+                        )}
+                      </Button>
+                      {oauthStatus && !isOAuthLoading && (
+                        <p className={`text-sm ${validationResult.valid ? 'text-green-600' : 'text-red-500'}`}>
+                          {oauthStatus}
+                        </p>
                       )}
-                    </Button>
-                    {oauthStatus && !isOAuthLoading && (
-                      <p className={`text-sm ${validationResult.valid ? 'text-green-600' : 'text-red-500'}`}>
-                        {oauthStatus}
-                      </p>
+                    </div>
+                  </TabsContent>
+                </Tabs>
+              )}
+
+              {(!supportsOAuth || isEditing) && (
+                <CredentialFieldsForm
+                  fields={credentialFields}
+                  credentials={credentials}
+                  onChange={handleCredentialChange}
+                  t={t}
+                  providerId={provider?.id}
+                />
+              )}
+
+              {validationResult.error && (
+                <div className="flex items-center gap-2 text-sm text-red-500 bg-red-50 p-3 rounded-lg">
+                  <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                  <span>{validationResult.error}</span>
+                </div>
+              )}
+
+              {validationResult.valid && validationResult.userInfo && (
+                <div className="flex items-center gap-2 text-sm text-green-600 bg-green-50 p-3 rounded-lg">
+                  <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
+                  <div>
+                    <span className="font-medium">{t('providers.validationSuccess')}</span>
+                    {validationResult.userInfo.quota !== undefined && (
+                      <span className="ml-2">
+                        {t('providers.quota')}: {validationResult.userInfo.used || 0} / {validationResult.userInfo.quota}
+                      </span>
                     )}
                   </div>
-                </TabsContent>
-              </Tabs>
-            )}
-
-            {(!supportsOAuth || isEditing) && (
-              <CredentialFieldsForm
-                fields={credentialFields}
-                credentials={credentials}
-                onChange={handleCredentialChange}
-                t={t}
-                providerId={provider?.id}
-              />
-            )}
-
-            {validationResult.error && (
-              <div className="flex items-center gap-2 text-sm text-red-500 bg-red-50 p-3 rounded-lg">
-                <AlertCircle className="h-4 w-4 flex-shrink-0" />
-                <span>{validationResult.error}</span>
-              </div>
-            )}
-
-            {validationResult.valid && validationResult.userInfo && (
-              <div className="flex items-center gap-2 text-sm text-green-600 bg-green-50 p-3 rounded-lg">
-                <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
-                <div>
-                  <span className="font-medium">{t('providers.validationSuccess')}</span>
-                  {validationResult.userInfo.quota !== undefined && (
-                    <span className="ml-2">
-                      {t('providers.quota')}: {validationResult.userInfo.used || 0} / {validationResult.userInfo.quota}
-                    </span>
-                  )}
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
 
-          <DialogFooter className="mt-6">
+          <DialogFooter className="shrink-0 gap-2 border-t px-6 py-4 sm:space-x-0">
             <Button
               variant="outline"
               onClick={() => onOpenChange(false)}
@@ -611,6 +669,45 @@ function CredentialFieldsForm({ fields, credentials, onChange, t, providerId }: 
           helpText: t('glm.refreshTokenHelp'),
         },
       },
+      doubao: {
+        sessionid: {
+          label: t('doubao.sessionid'),
+          placeholder: t('doubao.sessionidPlaceholder'),
+          helpText: t('doubao.sessionidHelp'),
+        },
+        cookie: {
+          label: t('doubao.cookie'),
+          placeholder: t('doubao.cookiePlaceholder'),
+          helpText: t('doubao.cookieHelp'),
+        },
+        fp: {
+          label: t('doubao.fp'),
+          placeholder: t('doubao.fpPlaceholder'),
+          helpText: t('doubao.fpHelp'),
+        },
+      },
+      yuanbao: {
+        cookie: {
+          label: t('yuanbao.cookie'),
+          placeholder: t('yuanbao.cookiePlaceholder'),
+          helpText: t('yuanbao.cookieHelp'),
+        },
+        hy_user: {
+          label: t('yuanbao.hyUser'),
+          placeholder: t('yuanbao.hyUserPlaceholder'),
+          helpText: t('yuanbao.hyUserHelp'),
+        },
+        hy_token: {
+          label: t('yuanbao.hyToken'),
+          placeholder: t('yuanbao.hyTokenPlaceholder'),
+          helpText: t('yuanbao.hyTokenHelp'),
+        },
+        x_uskey: {
+          label: t('yuanbao.xUskey'),
+          placeholder: t('yuanbao.xUskeyPlaceholder'),
+          helpText: t('yuanbao.xUskeyHelp'),
+        },
+      },
       kimi: {
         token: {
           label: t('kimi.accessToken'),
@@ -650,6 +747,26 @@ function CredentialFieldsForm({ fields, credentials, onChange, t, providerId }: 
           label: t('qwen.ssoTicket'),
           placeholder: t('qwen.ssoTicketPlaceholder'),
           helpText: t('qwen.ssoTicketHelp'),
+        },
+        cookie: {
+          label: t('qwen.cookie'),
+          placeholder: t('qwen.cookiePlaceholder'),
+          helpText: t('qwen.cookieHelp'),
+        },
+        csrfToken: {
+          label: t('qwen.csrfToken'),
+          placeholder: t('qwen.csrfTokenPlaceholder'),
+          helpText: t('qwen.csrfTokenHelp'),
+        },
+        umidToken: {
+          label: t('qwen.umidToken'),
+          placeholder: t('qwen.umidTokenPlaceholder'),
+          helpText: t('qwen.umidTokenHelp'),
+        },
+        deviceId: {
+          label: t('qwen.deviceId'),
+          placeholder: t('qwen.deviceIdPlaceholder'),
+          helpText: t('qwen.deviceIdHelp'),
         },
       },
       'qwen-ai': {

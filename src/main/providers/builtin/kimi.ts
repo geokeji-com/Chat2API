@@ -38,8 +38,8 @@ export const kimiConfig: BuiltinProviderConfig = {
       label: '访问令牌',
       type: 'password',
       required: true,
-      placeholder: '请输入 Kimi 访问令牌或刷新令牌',
-      helpText: '浏览器 Cookie 中的 kimi-auth 字段值（推荐），或 JWT Token / refresh_token',
+      placeholder: '请输入 Kimi kimi-auth 或 JWT 访问令牌',
+      helpText: '推荐填写浏览器 Cookie 中的 kimi-auth 字段值；JWT access token 也可使用。当前不会使用 refresh_token 做自动刷新。',
     },
     {
       name: 'cookies',
@@ -47,7 +47,7 @@ export const kimiConfig: BuiltinProviderConfig = {
       type: 'textarea',
       required: false,
       placeholder: '可选：从浏览器 DevTools 复制完整 Cookie 字符串',
-      helpText: '用于更接近 Kimi Web 端会话形态；不填写时会自动使用 kimi-auth=<访问令牌>',
+      helpText: '用于更接近 Kimi Web 端会话形态；不填写时会自动使用 kimi-auth=<上方令牌>',
     },
     {
       name: 'deviceId',

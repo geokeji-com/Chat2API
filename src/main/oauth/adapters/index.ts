@@ -5,6 +5,8 @@
 
 export { BaseOAuthAdapter } from './base'
 export { DeepSeekAdapter } from './deepseek'
+export { DoubaoAdapter } from './doubao'
+export { YuanbaoAdapter } from './yuanbao'
 export { GLMAdapter } from './glm'
 export { KimiAdapter } from './kimi'
 export { MimoAdapter } from './mimo'
@@ -15,6 +17,8 @@ export { QwenAiAdapter } from './qwen-ai'
 export { ZaiAdapter } from './zai'
 import { BaseOAuthAdapter } from './base'
 import { DeepSeekAdapter } from './deepseek'
+import { DoubaoAdapter } from './doubao'
+import { YuanbaoAdapter } from './yuanbao'
 import { GLMAdapter } from './glm'
 import { KimiAdapter } from './kimi'
 import { MimoAdapter } from './mimo'
@@ -35,6 +39,10 @@ export function createAdapter(
   switch (providerType) {
     case 'deepseek':
       return new DeepSeekAdapter(config)
+    case 'doubao':
+      return new DoubaoAdapter(config)
+    case 'yuanbao':
+      return new YuanbaoAdapter(config)
     case 'glm':
       return new GLMAdapter(config)
     case 'kimi':
@@ -63,6 +71,10 @@ export function getSupportedAuthMethods(providerType: ProviderType): string[] {
   switch (providerType) {
     case 'deepseek':
       return ['manual']
+    case 'doubao':
+      return ['manual', 'cookie']
+    case 'yuanbao':
+      return ['manual', 'cookie']
     case 'glm':
       return ['manual']
     case 'kimi':
