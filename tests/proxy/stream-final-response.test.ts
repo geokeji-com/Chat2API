@@ -54,6 +54,7 @@ test('final response transform appends a complete response before DONE', async (
       choices: [{ index: 0, delta: { content: ' world' }, finish_reason: 'stop' }],
       usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
       citations: [{ index: 1, title: 'Example', url: 'https://example.com' }],
+      source_list: [{ index: 1, title: 'Example', url: 'https://example.com' }],
       chat2api: { shareUrl: 'https://example.com/share' },
     }),
     sseEvent('[DONE]'),
@@ -80,6 +81,11 @@ test('final response transform appends a complete response before DONE', async (
     total_tokens: 5,
   })
   assert.deepEqual(finalChunk.final_response.choices[0].message.citations, [{
+    index: 1,
+    title: 'Example',
+    url: 'https://example.com',
+  }])
+  assert.deepEqual(finalChunk.final_response.choices[0].message.source_list, [{
     index: 1,
     title: 'Example',
     url: 'https://example.com',

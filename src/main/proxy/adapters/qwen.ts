@@ -76,6 +76,8 @@ interface QwenCitation {
   siteName?: string
   iconUrl?: string
   source?: string
+  sourceIndex?: number
+  sourceGroup?: string
 }
 
 interface QwenSearchSummary {
@@ -88,9 +90,14 @@ interface QwenChat2ApiInfo {
   session_id?: string
   req_id?: string
   response_id?: string
+  conversation_url?: string
   share_id?: string
   share_url?: string
   share_error?: string
+  citations?: QwenCitation[]
+  search_results?: QwenSearchSummary
+  search_queries?: string[]
+  related_searches?: string[]
 }
 
 type QwenShareInfoProvider = (
@@ -105,52 +112,88 @@ interface QwenSessionListPage {
 }
 
 const SEARCH_RESULT_KEYS = new Set([
-  'citation',
-  'citations',
-  'reference',
-  'references',
-  'searchresult',
-  'searchresults',
-  'webresult',
-  'webresults',
-  'webpage',
-  'webpages',
-  'source',
-  'sources',
-  'sourcelist',
-  'sourceitems',
+  'card',
+  'cardlist',
+  'cards',
+  'doclist',
   'docs',
   'documents',
+  'item',
+  'items',
+  'link',
   'links',
+  'list',
+  'note',
+  'notelist',
+  'notes',
+  'page',
   'pages',
+  'result',
   'results',
+  'searchdoc',
+  'searchdocs',
+  'searchresult',
+  'searchresults',
+  'video',
+  'videolist',
+  'videonote',
+  'videonotelist',
+  'videonotes',
+  'webpage',
+  'webpages',
+  'webresult',
+  'webresults',
+  'websearchresult',
+  'websearchresults',
+])
+
+const SOURCE_LIST_KEYS = new Set([
+  'answerreference',
+  'answerreferences',
+  'citation',
+  'citationlist',
+  'citations',
+  'material',
+  'materials',
+  'reference',
+  'referencelist',
+  'references',
+  'resource',
+  'resources',
+  'searchsource',
+  'searchsources',
+  'source',
+  'sourcecard',
+  'sourcecards',
+  'sourceitems',
+  'sourcelist',
+  'sources',
 ])
 
 const SEARCH_KEYWORD_KEYS = new Set([
+  'actualquery',
   'keyword',
   'keywords',
+  'query',
   'querykeyword',
+  'querykeywords',
+  'querylist',
   'queries',
+  'rewritequery',
+  'searchkeyword',
+  'searchkeywords',
   'searchqueries',
   'searchquery',
+  'searchtext',
+  'searchword',
+  'searchwords',
 ])
 
 const RELATED_SEARCH_KEYS = new Set([
-  'relatedsearch',
   'relatedsearches',
-  'relatedquestion',
-  'relatedquestions',
-  'suggestion',
-  'suggestions',
-  'suggestedquestion',
-  'suggestedquestions',
-  'recommendquestion',
-  'recommendquestions',
-  'queryrecommend',
-  'queryrecommends',
-  'recommendquery',
-  'recommendqueries',
 ])
+
+const QWEN_INLINE_CITATION_MARKER_PATTERN = /(?:\[\[)?source_group_web_(\d+)\]\]/g
 
 function asArray(value: any): any[] {
   if (Array.isArray(value)) return value
@@ -163,6 +206,10 @@ function isRecord(value: any): value is Record<string, any> {
 
 function normalizeKey(key: string | undefined): string {
   return (key || '').replace(/[_\-\s]/g, '').toLowerCase()
+}
+
+function createQwenSourceGroup(index: number): string {
+  return `source_group_web_${index}`
 }
 
 function pickString(...values: any[]): string | undefined {
@@ -202,6 +249,10 @@ function normalizeUrl(value: any): string | undefined {
   return undefined
 }
 
+function createQwenConversationUrl(sessionId: string): string {
+  return `https://www.qianwen.com/chat/${encodeURIComponent(sessionId)}`
+}
+
 function citationCandidates(raw: Record<string, any>): Record<string, any>[] {
   return [
     raw,
@@ -213,8 +264,20 @@ function citationCandidates(raw: Record<string, any>): Record<string, any>[] {
     raw.page,
     raw.webPage,
     raw.web_page,
+    raw.webpage,
+    raw.pageInfo,
+    raw.page_info,
     raw.document,
     raw.doc,
+    raw.docInfo,
+    raw.doc_info,
+    raw.link,
+    raw.item,
+    raw.card,
+    raw.video,
+    raw.note,
+    raw.urlInfo,
+    raw.url_info,
     raw.base,
     raw.content?.value,
     raw.content,
@@ -229,10 +292,57 @@ function pickFromCandidates(candidates: Record<string, any>[], picker: (candidat
   return undefined
 }
 
+function rewriteQwenInlineCitationMarkers(content: string, sourceGroupRefs: Map<string, number[]>): string {
+  if (sourceGroupRefs.size === 0) {
+    return content
+  }
+
+  return content
+    .replace(QWEN_INLINE_CITATION_MARKER_PATTERN, (match, rawIndex: string) => {
+      const citationIndexes = sourceGroupRefs.get(createQwenSourceGroup(Number(rawIndex))) || []
+      if (citationIndexes.length === 0) {
+        return match
+      }
+      return citationIndexes.map(index => `[citation:${index}]`).join('')
+    })
+    .replace(/\s+([，。！？；：,.!?;:])/g, '$1')
+}
+
+function collectQwenSourceGroupRefNums(value: any, refs: number[] = []): number[] {
+  if (value === undefined || value === null) {
+    return refs
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectQwenSourceGroupRefNums(item, refs)
+    }
+    return refs
+  }
+  if (!isRecord(value)) {
+    return refs
+  }
+
+  const refNum = pickPositiveInteger(value.ref_num, value.refNum, value.ref, value.cite_index, value.citeIndex)
+  if (refNum && !refs.includes(refNum) && normalizeQwenCitation(value, refNum)) {
+    refs.push(refNum)
+  }
+
+  for (const childValue of Object.values(value)) {
+    collectQwenSourceGroupRefNums(childValue, refs)
+  }
+
+  return refs
+}
+
 function normalizeQwenCitation(raw: any, fallbackIndex: number): QwenCitation | null {
   if (typeof raw === 'string') {
     const url = normalizeUrl(raw)
-    return url ? { index: fallbackIndex, title: url, url } : null
+    return url ? {
+      index: fallbackIndex,
+      title: url,
+      url,
+      sourceIndex: fallbackIndex,
+    } : null
   }
 
   if (!isRecord(raw)) {
@@ -250,12 +360,38 @@ function normalizeQwenCitation(raw: any, fallbackIndex: number): QwenCitation | 
         candidate.href,
         candidate.sourceUrl,
         candidate.source_url,
+        candidate.originUrl,
+        candidate.origin_url,
         candidate.pageUrl,
         candidate.page_url,
+        candidate.webUrl,
+        candidate.web_url,
         candidate.siteUrl,
         candidate.site_url,
         candidate.targetUrl,
         candidate.target_url,
+        candidate.jumpUrl,
+        candidate.jump_url,
+        candidate.linkUrl,
+        candidate.link_url,
+        candidate.landingUrl,
+        candidate.landing_url,
+        candidate.openUrl,
+        candidate.open_url,
+        candidate.pcUrl,
+        candidate.pc_url,
+        candidate.mobileUrl,
+        candidate.mobile_url,
+        candidate.contentUrl,
+        candidate.content_url,
+        candidate.videoUrl,
+        candidate.video_url,
+        candidate.noteUrl,
+        candidate.note_url,
+        candidate.docUrl,
+        candidate.doc_url,
+        candidate.realUrl,
+        candidate.real_url,
         candidate.rawUrl,
         candidate.raw_url,
         candidate.displayUrl,
@@ -273,6 +409,8 @@ function normalizeQwenCitation(raw: any, fallbackIndex: number): QwenCitation | 
     raw.index,
     raw.cite_index,
     raw.citeIndex,
+    raw.ref_num,
+    raw.refNum,
     raw.ref_index,
     raw.refIndex,
     raw.number,
@@ -282,6 +420,16 @@ function normalizeQwenCitation(raw: any, fallbackIndex: number): QwenCitation | 
   const title = pickFromCandidates(candidates, candidate => [
     candidate.title,
     candidate.name,
+    candidate.cardTitle,
+    candidate.card_title,
+    candidate.docTitle,
+    candidate.doc_title,
+    candidate.webTitle,
+    candidate.web_title,
+    candidate.displayTitle,
+    candidate.display_title,
+    candidate.mainTitle,
+    candidate.main_title,
     candidate.siteName,
     candidate.site_name,
     candidate.sourceName,
@@ -290,8 +438,25 @@ function normalizeQwenCitation(raw: any, fallbackIndex: number): QwenCitation | 
 
   const snippet = pickFromCandidates(candidates, candidate => [
     candidate.snippet,
+    candidate.fragment,
+    candidate.fragments,
+    candidate.contentFragment,
+    candidate.content_fragment,
+    candidate.textFragment,
+    candidate.text_fragment,
+    candidate.passage,
+    candidate.passages,
+    candidate.quote,
+    candidate.quotes,
+    candidate.context,
+    candidate.contextText,
+    candidate.context_text,
+    candidate.contentText,
+    candidate.content_text,
     candidate.summary,
     candidate.description,
+    candidate.desc,
+    candidate.subtitle,
     candidate.abstract,
     candidate.text,
     typeof candidate.content === 'string' ? candidate.content : undefined,
@@ -302,6 +467,12 @@ function normalizeQwenCitation(raw: any, fallbackIndex: number): QwenCitation | 
     candidate.site_name,
     candidate.sourceName,
     candidate.source_name,
+    candidate.mediaName,
+    candidate.media_name,
+    candidate.publisher,
+    candidate.author,
+    candidate.website,
+    candidate.site,
     candidate.host,
     candidate.domain,
   ])
@@ -321,6 +492,13 @@ function normalizeQwenCitation(raw: any, fallbackIndex: number): QwenCitation | 
     candidate.type,
   ])
 
+  const sourceGroup = pickFromCandidates(candidates, candidate => [
+    candidate.sourceGroup,
+    candidate.source_group,
+    candidate.sourceGroupId,
+    candidate.source_group_id,
+  ])
+
   return {
     index,
     title,
@@ -329,6 +507,8 @@ function normalizeQwenCitation(raw: any, fallbackIndex: number): QwenCitation | 
     ...(siteName ? { siteName } : {}),
     ...(iconUrl ? { iconUrl } : {}),
     ...(source ? { source } : {}),
+    sourceIndex: index,
+    ...(sourceGroup ? { sourceGroup } : {}),
   }
 }
 
@@ -369,7 +549,44 @@ function extractCookieValue(cookie: string, name: string): string {
 }
 
 function createQwenShareUrl(shareId: string): string {
-  return `https://www.qianwen.com/share/chat?biz_id=ai_qwen&env=prod&qwcontainer=qk&share_id=${encodeURIComponent(shareId)}`
+  return `https://www.qianwen.com/share/chat/${encodeURIComponent(shareId)}`
+}
+
+function parseJsonString(value: string): any | undefined {
+  const text = value.trim()
+  if (!text || !/^[\[{]/.test(text)) {
+    return undefined
+  }
+
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+function sanitizeQwenAnswerContent(content: string): string {
+  let filtered = content
+    .replace(/\[\(deep_think\)\]/g, '')
+    .replace(/\[\(multimodal_chat_think_\d+\)\]/g, '')
+    .replace(/\[\((?:video_note_list|video_list|note_list|webpage_list|source_list|card_list|reference_list|search_result_list)_\d+\)\]/gi, '')
+
+  const lines = filtered.split(/\r?\n/)
+  const artifactStart = lines.findIndex((line, index) => {
+    const title = line.trim().replace(/^#{1,6}\s*/, '').replace(/[*_`]/g, '')
+    if (!/^(?:视频笔记列表|视频列表|笔记列表|相关视频|相关笔记|推荐视频|推荐笔记|video note list|video list|note list)[:：]?$/i.test(title)) {
+      return false
+    }
+
+    const following = lines.slice(index + 1, index + 6).join('\n')
+    return !following.trim() || /https?:\/\/|^\s*(?:[-*•]|\d+[.)、])\s+/m.test(following)
+  })
+
+  if (artifactStart >= 0) {
+    filtered = lines.slice(0, artifactStart).join('\n').trimEnd()
+  }
+
+  return filtered
 }
 
 export class QwenAdapter {
@@ -748,6 +965,7 @@ export class QwenAdapter {
     const baseInfo: QwenChat2ApiInfo = {
       provider: 'qwen',
       ...(sessionId ? { session_id: sessionId } : {}),
+      ...(sessionId ? { conversation_url: createQwenConversationUrl(sessionId) } : {}),
       ...(reqId ? { req_id: reqId } : {}),
     }
 
@@ -876,7 +1094,9 @@ export class QwenStreamHandler {
   private reqId: string = ''
   private searchKeywords: string[] = []
   private searchResults: QwenCitation[] = []
+  private sourceResults: QwenCitation[] = []
   private relatedSearches: string[] = []
+  private sourceGroupRefs: Map<string, number[]> = new Map()
   private shareId: string = ''
   private shareUrl: string = ''
   private shareError: string = ''
@@ -958,8 +1178,8 @@ export class QwenStreamHandler {
     }
   }
 
-  private nextAvailableCitationIndex(): number {
-    const usedIndexes = new Set(this.searchResults.map(item => item.index))
+  private nextAvailableCitationIndex(results: QwenCitation[] = this.searchResults): number {
+    const usedIndexes = new Set(results.map(item => item.index))
     let index = 1
     while (usedIndexes.has(index)) {
       index += 1
@@ -983,7 +1203,21 @@ export class QwenStreamHandler {
     for (const item of asArray(related)) {
       const question = typeof item === 'string'
         ? item.trim()
-        : pickString(item?.query, item?.question, item?.title, item?.text, item?.content, item?.keyword)
+        : pickString(
+          item?.query,
+          item?.question,
+          item?.questionText,
+          item?.question_text,
+          item?.queryText,
+          item?.query_text,
+          item?.prompt,
+          item?.value,
+          item?.title,
+          item?.text,
+          item?.content,
+          item?.keyword,
+          item?.label
+        )
 
       if (question && !this.relatedSearches.includes(question)) {
         this.relatedSearches = [...this.relatedSearches, question]
@@ -991,37 +1225,80 @@ export class QwenStreamHandler {
     }
   }
 
-  private addSearchResults(results: any): void {
+  private mergeCitation(results: QwenCitation[], citation: QwenCitation): QwenCitation[] {
+    const existingIndex = results.findIndex(item => item.url === citation.url)
+    if (existingIndex >= 0) {
+      const existing = results[existingIndex]
+      const shouldPreferCitationIndex = !existing.snippet && Boolean(citation.snippet)
+      const index = shouldPreferCitationIndex ? citation.index : (existing.index || citation.index)
+      const sourceIndex = shouldPreferCitationIndex
+        ? (citation.sourceIndex || citation.index)
+        : (existing.sourceIndex || existing.index || citation.sourceIndex || citation.index)
+      return [
+        ...results.slice(0, existingIndex),
+        {
+          ...existing,
+          ...citation,
+          index,
+          sourceIndex,
+          sourceGroup: shouldPreferCitationIndex
+            ? citation.sourceGroup
+            : (existing.sourceGroup || citation.sourceGroup),
+        },
+        ...results.slice(existingIndex + 1),
+      ]
+    }
+
+    return [...results, citation]
+  }
+
+  private addCitationResults(results: any, target: 'search' | 'source'): void {
     for (const raw of asArray(results)) {
       if (Array.isArray(raw)) {
-        this.addSearchResults(raw)
+        this.addCitationResults(raw, target)
         continue
       }
 
-      const citation = normalizeQwenCitation(raw, this.nextAvailableCitationIndex())
+      const currentResults = target === 'source' ? this.sourceResults : this.searchResults
+      const citation = normalizeQwenCitation(raw, this.nextAvailableCitationIndex(currentResults))
       if (citation) {
-        const existingIndex = this.searchResults.findIndex(item => item.url === citation.url)
-        if (existingIndex >= 0) {
-          const existing = this.searchResults[existingIndex]
-          this.searchResults = [
-            ...this.searchResults.slice(0, existingIndex),
-            {
-              ...existing,
-              ...citation,
-              index: existing.index || citation.index,
-            },
-            ...this.searchResults.slice(existingIndex + 1),
-          ]
+        if (target === 'source') {
+          this.sourceResults = this.mergeCitation(this.sourceResults, citation)
         } else {
-          this.searchResults = [...this.searchResults, citation]
+          this.searchResults = this.mergeCitation(this.searchResults, citation)
         }
       }
 
       if (isRecord(raw)) {
         this.addSearchKeywords(raw.keywords ?? raw.keyword ?? raw.queries ?? raw.searchQueries ?? raw.search_queries)
-        this.addSearchResults(raw.webPages ?? raw.web_pages ?? raw.pages ?? raw.results ?? raw.items ?? raw.list)
+        this.addCitationResults(raw.webPages ?? raw.web_pages ?? raw.pages ?? raw.results ?? raw.items ?? raw.list ?? raw.cards ?? raw.cardList ?? raw.card_list ?? raw.sources ?? raw.sourceList ?? raw.source_list, target)
       }
     }
+  }
+
+  private addSearchResults(results: any): void {
+    this.addCitationResults(results, 'search')
+  }
+
+  private addSourceResults(results: any): void {
+    this.addCitationResults(results, 'source')
+    this.addCitationResults(results, 'search')
+  }
+
+  private addSourceGroupReferences(value: Record<string, any>): void {
+    const type = pickString(value.type)
+    const sourceGroup = pickString(value.source_seq, value.sourceSeq, value.source_group, value.sourceGroup)
+    if (type !== 'source_group_web' || !sourceGroup || !/^source_group_web_\d+$/.test(sourceGroup)) {
+      return
+    }
+
+    const refs = collectQwenSourceGroupRefNums(value)
+    if (refs.length === 0) {
+      return
+    }
+
+    const existing = this.sourceGroupRefs.get(sourceGroup) || []
+    this.sourceGroupRefs.set(sourceGroup, [...new Set([...existing, ...refs])])
   }
 
   private collectShareCandidate(value: any): void {
@@ -1064,8 +1341,18 @@ export class QwenStreamHandler {
     if (normalizedKey.includes('share')) {
       this.collectShareCandidate(value)
     }
-    if (SEARCH_RESULT_KEYS.has(normalizedKey)) {
+    if (SOURCE_LIST_KEYS.has(normalizedKey)) {
+      this.addSourceResults(value)
+    } else if (SEARCH_RESULT_KEYS.has(normalizedKey)) {
       this.addSearchResults(value)
+    }
+
+    if (typeof value === 'string') {
+      const parsed = parseJsonString(value)
+      if (parsed !== undefined) {
+        this.collectSearchArtifacts(parsed, key, depth + 1)
+      }
+      return
     }
 
     if (Array.isArray(value)) {
@@ -1079,17 +1366,34 @@ export class QwenStreamHandler {
       return
     }
 
+    this.addSourceGroupReferences(value)
+
+    if (!SOURCE_LIST_KEYS.has(normalizedKey) && !SEARCH_RESULT_KEYS.has(normalizedKey) && !normalizedKey.includes('share')) {
+      const citation = normalizeQwenCitation(value, this.nextAvailableCitationIndex())
+      if (citation && citation.title !== citation.url) {
+        this.addSearchResults(value)
+      }
+    }
+
     for (const [childKey, childValue] of Object.entries(value)) {
       this.collectSearchArtifacts(childValue, childKey, depth + 1)
     }
   }
 
   private createCitationList(): QwenCitation[] {
-    return [...this.searchResults].sort((a, b) => a.index - b.index)
+    const sourceResults = this.sourceResults.length > 0 ? this.sourceResults : this.searchResults
+    const resultsWithFragments = sourceResults.filter(item => typeof item.snippet === 'string' && item.snippet.trim().length > 0)
+    const citations = resultsWithFragments.length > 0 ? resultsWithFragments : sourceResults
+    return [...citations].sort((a, b) => a.index - b.index)
+  }
+
+  private createSearchResultList(): QwenCitation[] {
+    const searchResults = this.searchResults.length > 0 ? this.searchResults : this.sourceResults
+    return [...searchResults].sort((a, b) => a.index - b.index)
   }
 
   private createSearchSummary(): QwenSearchSummary | undefined {
-    const webPages = this.createCitationList()
+    const webPages = this.createSearchResultList()
     if (this.searchKeywords.length === 0 && webPages.length === 0) {
       return undefined
     }
@@ -1102,13 +1406,20 @@ export class QwenStreamHandler {
 
   private createChat2ApiInfo(): QwenChat2ApiInfo {
     const reqId = this.responseId || this.reqId
+    const citations = this.createCitationList()
+    const searchSummary = this.createSearchSummary()
     const info: QwenChat2ApiInfo = {
       provider: 'qwen',
       ...(this.sessionId ? { session_id: this.sessionId } : {}),
+      ...(this.sessionId ? { conversation_url: createQwenConversationUrl(this.sessionId) } : {}),
       ...(this.reqId ? { req_id: this.reqId } : {}),
       ...(reqId && reqId !== this.reqId ? { response_id: reqId } : {}),
       ...(this.shareId ? { share_id: this.shareId } : {}),
       ...(this.shareUrl ? { share_url: this.shareUrl } : {}),
+      ...(citations.length > 0 ? { citations } : {}),
+      ...(searchSummary ? { search_results: searchSummary } : {}),
+      ...(this.searchKeywords.length > 0 ? { search_queries: [...this.searchKeywords] } : {}),
+      ...(this.relatedSearches.length > 0 ? { related_searches: [...this.relatedSearches] } : {}),
     }
 
     if (this.shareError) {
@@ -1116,6 +1427,20 @@ export class QwenStreamHandler {
     }
 
     return info
+  }
+
+  private attachDeepSeekStyleMetadata(target: Record<string, any>): void {
+    const citations = this.createCitationList()
+
+    if (citations.length > 0) {
+      target.citations = citations
+    }
+    if (this.searchKeywords.length > 0) {
+      target.search_queries = [...this.searchKeywords]
+    }
+    if (this.relatedSearches.length > 0) {
+      target.related_searches = [...this.relatedSearches]
+    }
   }
 
   private async ensureShareInfo(): Promise<void> {
@@ -1151,23 +1476,16 @@ export class QwenStreamHandler {
   private attachMetadataToResponse(data: any): void {
     const message = data?.choices?.[0]?.message
     if (message && typeof message === 'object') {
-      const citations = this.createCitationList()
-      const searchSummary = this.createSearchSummary()
-      if (citations.length > 0) {
-        message.citations = citations
-      }
-      if (searchSummary) {
-        message.search_results = searchSummary
-      }
-      if (this.searchKeywords.length > 0) {
-        message.search_queries = [...this.searchKeywords]
-      }
-      if (this.relatedSearches.length > 0) {
-        message.related_searches = [...this.relatedSearches]
-      }
+      this.attachDeepSeekStyleMetadata(message)
     }
-
     data.chat2api = this.createChat2ApiInfo()
+  }
+
+  private normalizeAnswerContent(content: string): string {
+    return rewriteQwenInlineCitationMarkers(
+      sanitizeQwenAnswerContent(content),
+      this.sourceGroupRefs
+    )
   }
 
   private createFinalChunk(finishReason: 'stop' | 'tool_calls'): any {
@@ -1181,20 +1499,7 @@ export class QwenStreamHandler {
       chat2api: this.createChat2ApiInfo(),
     }
 
-    const citations = this.createCitationList()
-    const searchSummary = this.createSearchSummary()
-    if (citations.length > 0) {
-      finalChunk.citations = citations
-    }
-    if (searchSummary) {
-      finalChunk.search_results = searchSummary
-    }
-    if (this.searchKeywords.length > 0) {
-      finalChunk.search_queries = [...this.searchKeywords]
-    }
-    if (this.relatedSearches.length > 0) {
-      finalChunk.related_searches = [...this.relatedSearches]
-    }
+    this.attachDeepSeekStyleMetadata(finalChunk)
 
     return finalChunk
   }
@@ -1228,6 +1533,21 @@ export class QwenStreamHandler {
       transStream.write(`data: ${JSON.stringify(this.createFinalChunk(finishReason))}\n\n`)
       safeEnd('data: [DONE]\n\n')
       this.onEnd?.(this.sessionId)
+    }
+
+    const finalizeFromClose = () => {
+      if (streamEnded || this.stopSent || finalizing) return
+      this.stopSent = true
+
+      const baseChunk = createBaseChunk(this.responseId || this.sessionId, this.model, this.created)
+      const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
+
+      for (const outChunk of flushChunks) {
+        transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+      }
+
+      const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
+      void finalizeStream(finishReason)
     }
 
     const processBuffer = () => {
@@ -1348,15 +1668,7 @@ export class QwenStreamHandler {
                 
                 // Filter out [(deep_think)] and [(multimodal_chat_think_*)] markers from content
                 if ((msg.mime_type === 'text/plain' || msg.mime_type === 'multi_load/iframe') && msg.content) {
-                  // Skip content that is just the deep_think marker
-                  let newContent = msg.content
-                  if (newContent === '[(deep_think)]' || newContent.trim() === '[(deep_think)]') {
-                    console.log('[Qwen] Skipping deep_think marker')
-                    continue
-                  }
-                  // Remove any deep_think and multimodal_chat_think markers from content
-                  newContent = newContent.replace(/\[\(deep_think\)\]/g, '')
-                  newContent = newContent.replace(/\[\(multimodal_chat_think_\d+\)\]/g, '')
+                  const newContent = this.normalizeAnswerContent(String(msg.content))
                   
                   if (!newContent.trim()) {
                     console.log('[Qwen] Skipping empty content after filtering')
@@ -1477,7 +1789,7 @@ export class QwenStreamHandler {
             buffer = decompressedStr
             processBuffer()
             if (!this.stopSent && !finalizing) {
-              safeEnd('data: [DONE]\n\n')
+              finalizeFromClose()
             }
           })
         } catch (err) {
@@ -1506,7 +1818,7 @@ export class QwenStreamHandler {
       if (streamEnded) return
       processBuffer()
       if (!this.stopSent && !finalizing) {
-        safeEnd('data: [DONE]\n\n')
+        finalizeFromClose()
       }
     })
 
@@ -1529,7 +1841,6 @@ export class QwenStreamHandler {
             reasoning_content?: string
             tool_calls?: any[]
             citations?: QwenCitation[]
-            search_results?: QwenSearchSummary
             search_queries?: string[]
             related_searches?: string[]
           }
@@ -1650,15 +1961,11 @@ export class QwenStreamHandler {
                   
                   // Handle multi_load/iframe content (actual response content)
                   if (msg.mime_type === 'multi_load/iframe' && msg.content) {
-                    // Filter out deep_think and multimodal_chat_think markers
-                    let filteredContent = msg.content
-                    if (filteredContent === '[(deep_think)]' || filteredContent.trim() === '[(deep_think)]') {
-                      console.log('[Qwen] Non-stream: Skipping deep_think marker')
+                    const filteredContent = this.normalizeAnswerContent(String(msg.content))
+                    if (!filteredContent.trim()) {
+                      console.log('[Qwen] Non-stream: Skipping empty content after filtering')
                       continue
                     }
-                    // Filter out all think markers: [(deep_think)], [(multimodal_chat_think_*)]
-                    filteredContent = filteredContent.replace(/\[\(deep_think\)\]/g, '')
-                    filteredContent = filteredContent.replace(/\[\(multimodal_chat_think_\d+\)\]/g, '')
                     if (filteredContent.length > contentAccumulator.length) {
                       contentAccumulator = filteredContent
                       console.log('[Qwen] Non-stream multi_load/iframe content length:', contentAccumulator.length)
@@ -1667,9 +1974,7 @@ export class QwenStreamHandler {
                   
                   // Also handle text/plain content
                   if (msg.mime_type === 'text/plain' && msg.content) {
-                    // Filter out deep_think and multimodal_chat_think markers
-                    let filteredContent = msg.content.replace(/\[\(deep_think\)\]/g, '')
-                    filteredContent = filteredContent.replace(/\[\(multimodal_chat_think_\d+\)\]/g, '')
+                    const filteredContent = this.normalizeAnswerContent(String(msg.content))
                     if (filteredContent.length > contentAccumulator.length) {
                       contentAccumulator = filteredContent
                     }
