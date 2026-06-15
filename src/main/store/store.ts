@@ -334,6 +334,7 @@ class StoreManager {
 
           return { 
             ...p, 
+            name: builtinConfig.name,
             apiEndpoint: builtinConfig.apiEndpoint,
             chatPath: builtinConfig.chatPath,
             supportedModels: builtinConfig.supportedModels,

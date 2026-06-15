@@ -100,6 +100,7 @@ test('DeepSeek persisted model overrides are migrated away from old built-in ali
 
   assert.match(storeSource, /p\.id === 'deepseek'/)
   assert.match(storeSource, /sanitizeDeepSeekModelOverrides/)
+  assert.match(storeSource, /name: builtinConfig\.name/)
   assert.match(storeSource, /supportedModels: builtinConfig\.supportedModels/)
   assert.match(storeSource, /modelMappings: builtinConfig\.modelMappings/)
 })
