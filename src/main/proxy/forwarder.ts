@@ -369,7 +369,7 @@ export class RequestForwarder {
     let currentAccount = account
     let currentProxyNode: ProxyNode | undefined
 
-    const proxyAssignment = await proxyPoolManager.ensureAccountProxy(account, provider)
+    const proxyAssignment = await proxyPoolManager.ensureAccountProxyForCity(account, provider, request.proxy_city)
     if (proxyAssignment.error) {
       return {
         success: false,

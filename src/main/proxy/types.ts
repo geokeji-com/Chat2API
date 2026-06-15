@@ -100,6 +100,8 @@ export interface ChatCompletionRequest {
   reasoningEffort?: 'low' | 'medium' | 'high'
   /** Enable deep research mode (GLM specific) */
   deep_research?: boolean
+  /** Internal Chat2API proxy-pool city constraint. Ignored when no matching node exists. */
+  proxy_city?: string
   /** Tools for function calling */
   tools?: ChatCompletionTool[]
   /** Tool choice strategy */

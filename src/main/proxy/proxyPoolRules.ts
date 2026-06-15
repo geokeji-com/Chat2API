@@ -29,6 +29,12 @@ export function isProxyNodeAssignable(node: ProxyNode, now: number = Date.now())
   return node.status === 'active'
 }
 
+export function proxyNodeMatchesRegion(node: ProxyNode, regionCode?: string): boolean {
+  const normalized = normalizeRegionCode(regionCode)
+  if (!normalized) return true
+  return normalizeRegionCode(node.regionCode) === normalized
+}
+
 export function isProxyNodeUsedByProvider(
   accounts: ProxyAccountView[],
   proxyId: string,
@@ -50,10 +56,12 @@ export function selectProxyNodeForAccount(
   providerId: string,
   accountId: string,
   excludedProxyId?: string,
-  now: number = Date.now()
+  now: number = Date.now(),
+  regionCode?: string,
 ): ProxyNode | undefined {
   return nodes
     .filter(node => isProxyNodeAssignable(node, now))
+    .filter(node => proxyNodeMatchesRegion(node, regionCode))
     .filter(node => node.id !== excludedProxyId)
     .filter(node => !isProxyNodeUsedByProvider(accounts, node.id, providerId, accountId))
     .sort((a, b) => {
@@ -61,4 +69,37 @@ export function selectProxyNodeForAccount(
       if (failureDiff !== 0) return failureDiff
       return (a.lastCheckedAt || 0) - (b.lastCheckedAt || 0)
     })[0]
+}
+
+export function canAccountUseProxyRegion(
+  account: ProxyAccountView,
+  nodes: ProxyNode[],
+  accounts: ProxyAccountView[],
+  regionCode: string,
+  now: number = Date.now(),
+): boolean {
+  if (normalizeProxyMode(account.proxyMode) !== 'auto') return false
+
+  const currentProxyId = account.proxyBinding?.proxyId
+  if (currentProxyId) {
+    const currentNode = nodes.find(node => node.id === currentProxyId)
+    if (
+      currentNode &&
+      isProxyNodeAssignable(currentNode, now) &&
+      proxyNodeMatchesRegion(currentNode, regionCode) &&
+      !isProxyNodeUsedByProvider(accounts, currentNode.id, account.providerId, account.id)
+    ) {
+      return true
+    }
+  }
+
+  return Boolean(selectProxyNodeForAccount(
+    nodes,
+    accounts,
+    account.providerId,
+    account.id,
+    undefined,
+    now,
+    regionCode,
+  ))
 }

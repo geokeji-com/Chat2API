@@ -300,6 +300,31 @@ export class ProxyPoolManager {
     return { account: updated, proxyNode }
   }
 
+  async ensureAccountProxyForCity(account: Account, provider: Provider, city?: string): Promise<ProxyAssignment> {
+    const requestedCity = city?.trim()
+    if (!requestedCity) {
+      return this.ensureAccountProxy(account, provider)
+    }
+
+    if (normalizeProxyMode(account.proxyMode) !== 'auto') {
+      return { account: { ...account, proxyMode: 'none', proxyBinding: undefined } }
+    }
+
+    const proxyNode = this.selectAvailableNodeByCity(provider.id, account.id, requestedCity)
+    if (!proxyNode) {
+      console.log(`[ProxyPool] No available proxy node for city "${requestedCity}", falling back to default pool`)
+      return this.ensureAccountProxy(account, provider)
+    }
+
+    const currentProxyId = account.proxyBinding?.proxyId
+    if (currentProxyId === proxyNode.id) {
+      return { account, proxyNode }
+    }
+
+    const updated = this.bindAccount(account, proxyNode, false)
+    return { account: updated, proxyNode }
+  }
+
   assignAccount(accountId: string): ProxyAssignment {
     const account = storeManager.getAccountById(accountId, true)
     if (!account) throw new Error('Account not found')
@@ -413,6 +438,21 @@ export class ProxyPoolManager {
     )
   }
 
+  private selectAvailableNodeByCity(providerId: string, accountId: string, city: string): ProxyNode | undefined {
+    const normalizedCity = normalizeCityName(city)
+    if (!normalizedCity) return undefined
+
+    return storeManager.getProxyNodes(true)
+      .filter(node => isProxyNodeAssignable(node))
+      .filter(node => normalizeCityName(node.city) === normalizedCity)
+      .filter(node => !this.isNodeUsedByProvider(node.id, providerId, accountId))
+      .sort((a, b) => {
+        const failureDiff = (a.failureCount || 0) - (b.failureCount || 0)
+        if (failureDiff !== 0) return failureDiff
+        return (a.lastCheckedAt || 0) - (b.lastCheckedAt || 0)
+      })[0]
+  }
+
   private isNodeUsedByProvider(proxyId: string, providerId: string, exceptAccountId?: string): boolean {
     return isProxyNodeUsedByProvider(storeManager.getAccounts(false), proxyId, providerId, exceptAccountId)
   }
@@ -433,6 +473,10 @@ export class ProxyPoolManager {
       throw new Error('SOCKS5 username and password must be at most 255 bytes')
     }
   }
+}
+
+function normalizeCityName(city?: string): string {
+  return (city || '').trim().replace(/市$/, '').toLowerCase()
 }
 
 export const proxyPoolManager = new ProxyPoolManager()
