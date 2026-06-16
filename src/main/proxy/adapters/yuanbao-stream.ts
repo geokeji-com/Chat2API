@@ -136,13 +136,17 @@ export class YuanbaoStreamHandler {
       source_list: this.metadata?.source_list || '',
       search_results: this.metadata?.search_results || '',
       related_searches: this.metadata?.related_searches || '',
+      search_queries: this.metadata?.search_queries || [],
+      videos: this.metadata?.videos || [],
       share_url: this.metadata?.share_url || '',
+      share_id: this.metadata?.share_id || '',
     }
   }
 
   private createFinalMetadata(): Record<string, any> {
     const conversationUrl = this.metadata?.conversation_url || ''
     const shareUrl = this.metadata?.share_url || ''
+    const shareId = this.metadata?.share_id || ''
     return {
       ...this.createMessageMetadata(),
       chat2api: {
@@ -152,6 +156,9 @@ export class YuanbaoStreamHandler {
         message_id: this.metadata?.message_id || this.messageId || '',
         conversation_url: conversationUrl,
         share_url: shareUrl,
+        share_id: shareId,
+        videos: this.metadata?.videos || [],
+        search_queries: this.metadata?.search_queries || [],
         ...this.createMessageMetadata(),
       },
     }
