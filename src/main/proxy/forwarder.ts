@@ -879,7 +879,16 @@ export class RequestForwarder {
   ): Promise<ForwardResult> {
     try {
       const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
+
+      // Retrieve existing session state for multi-turn continuity
+      const existingSession = sessionManager.getActiveSession(provider.id, account.id)
+      const existingChatId = existingSession?.metadata?.providerSessionId
+      const existingLastMessageId = existingSession?.metadata?.providerLastMessageId
+
+      if (existingChatId) {
+        console.log('[Kimi] Resuming conversation:', existingChatId, 'parent:', existingLastMessageId)
+      }
+
       const adapter = new KimiAdapter(provider, account, outboundProxy)
       const { response, conversationId } = await adapter.chatCompletion({
         model: actualModel,
@@ -889,6 +898,8 @@ export class RequestForwarder {
         temperature: request.temperature,
         enableThinking: !!request.reasoning_effort,
         enableWebSearch: !!request.web_search,
+        chatId: existingChatId,
+        lastMessageId: existingLastMessageId,
       })
 
       const latency = Date.now() - startTime
@@ -921,23 +932,47 @@ export class RequestForwarder {
         )
       )
       
+      const saveSessionState = (chatId: string | null, lastMessageId: string | null) => {
+        if (!chatId || shouldDeleteSession()) return
+        const session = sessionManager.getActiveSession(provider.id, account.id)
+        if (session) {
+          storeManager.updateSession(session.id, {
+            metadata: {
+              ...session.metadata,
+              providerSessionId: chatId,
+              ...(lastMessageId ? { providerLastMessageId: lastMessageId } : {}),
+            },
+          })
+        } else {
+          const newSession = sessionManager.createSession({ providerId: provider.id, accountId: account.id, model: actualModel })
+          storeManager.updateSession(newSession.id, {
+            metadata: {
+              providerSessionId: chatId,
+              ...(lastMessageId ? { providerLastMessageId: lastMessageId } : {}),
+            },
+          })
+        }
+      }
+
       if (request.stream) {
         const transformedStream = await handler.handleStream(response.data)
-        
-        // Add delete conversation callback if needed
-        if (shouldDeleteSession()) {
-          const originalEnd = transformedStream.end.bind(transformedStream)
-          transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
-            const realChatId = handler.getConversationId()
-            if (realChatId) {
+
+        const originalEnd = transformedStream.end.bind(transformedStream)
+        transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
+          const realChatId = handler.getConversationId()
+          const lastMsgId = handler.getLastMessageId()
+          if (realChatId) {
+            if (shouldDeleteSession()) {
               adapter.deleteConversation(realChatId).catch(err => {
                 console.error('[Kimi] Failed to delete conversation:', err)
               })
+            } else {
+              saveSessionState(realChatId, lastMsgId)
             }
-            return originalEnd(chunk, encoding, callback)
           }
+          return originalEnd(chunk, encoding, callback)
         }
-        
+
         return {
           success: true,
           status: response.status,
@@ -945,7 +980,7 @@ export class RequestForwarder {
           stream: transformedStream,
           skipTransform: true,
           latency,
-          providerSessionId: undefined,
+          providerSessionId: existingChatId || undefined,
         }
       }
 
@@ -970,6 +1005,8 @@ export class RequestForwarder {
         if (realChatId) {
           await adapter.deleteConversation(realChatId)
         }
+      } else {
+        saveSessionState(realChatId, handler.getLastMessageId())
       }
 
       return {

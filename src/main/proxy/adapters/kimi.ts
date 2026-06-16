@@ -66,6 +66,8 @@ interface ChatCompletionRequest {
   tool_choice?: any
   conversationId?: string
   parentId?: string
+  chatId?: string
+  lastMessageId?: string
 }
 
 const accessTokenMap = new Map<string, TokenInfo>()
@@ -415,17 +417,17 @@ export class KimiAdapter {
       }
     }
 
-    const content = this.messagesPrepare(messages, toolsPrompt, false)
+    const content = this.messagesPrepare(messages, toolsPrompt, !!request.chatId)
 
     // Determine if thinking and web search should be enabled
     // Priority: explicit parameters > model name detection
     // Use originalModel for feature detection (preserves user's intent before mapping)
     const modelForDetection = request.originalModel || request.model
     const modelLower = modelForDetection.toLowerCase()
-    
+
     let enableThinking = request.enableThinking ?? false
     let enableWebSearch = request.enableWebSearch ?? false
-    
+
     // Auto-enable based on model name (if not explicitly set)
     if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
       enableThinking = true
@@ -441,6 +443,8 @@ export class KimiAdapter {
       content,
       enableWebSearch,
       enableThinking,
+      chatId: request.chatId,
+      parentId: request.lastMessageId,
     })
     const frameBuffer = encodeKimiGrpcFrame(payload)
 

@@ -498,6 +498,10 @@ export interface SessionRecord {
   metadata?: {
     title?: string
     tokenCount?: number
+    /** Provider-side conversation ID (e.g. Kimi chat_id) */
+    providerSessionId?: string
+    /** Last assistant message ID from the provider (e.g. Kimi message_id for parent_id) */
+    providerLastMessageId?: string
   }
 }
 

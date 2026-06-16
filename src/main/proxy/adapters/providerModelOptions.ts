@@ -82,15 +82,19 @@ export function createKimiChatPayload(options: {
   content: string
   enableWebSearch: boolean
   enableThinking: boolean
+  chatId?: string
+  parentId?: string
 }) {
   const scenario = resolveKimiScenario(options.model)
 
   return {
+    ...(options.chatId ? { chat_id: options.chatId } : {}),
     scenario,
     tools: options.enableWebSearch
       ? [{ type: 'TOOL_TYPE_SEARCH', search: {} }]
       : [],
     message: {
+      ...(options.parentId ? { parent_id: options.parentId } : {}),
       role: 'user',
       blocks: [{
         message_id: '',
