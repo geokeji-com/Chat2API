@@ -728,12 +728,13 @@ def filter_cited_citations(answer: str, citations: list[dict[str, Any]], platfor
             cited_indexes.add(int(m.group(1)) + 1)
 
     if not cited_indexes:
-        return []
+        # 没有内联引用标记时，kimi 代表确实无引用（标记必定存在）；其他平台保留全部
+        return [] if platform_id == "kimi" else citations
 
     return [c for c in citations if isinstance(c.get("index"), int) and c["index"] in cited_indexes]
 
 
-
+def render_citation_markers(text: str, citations: list[dict[str, Any]]) -> str:
     if not text:
         return ""
 
@@ -771,6 +772,7 @@ def extract_structured_fields(response: dict[str, Any]) -> dict[str, Any]:
     citations_source = first_non_empty(
         message.get("citations"),
         response.get("citations"),
+        chat2api.get("citations"),
         message.get("references"),
         response.get("references"),
         message.get("sources"),
@@ -793,16 +795,23 @@ def extract_structured_fields(response: dict[str, Any]) -> dict[str, Any]:
         "searchQueries": normalize_text_list(first_non_empty(
             message.get("search_queries"),
             response.get("search_queries"),
+            chat2api.get("search_queries"),
             message.get("searchQueries"),
             response.get("searchQueries"),
         )),
         "relatedSearches": normalize_text_list(first_non_empty(
             message.get("related_searches"),
             response.get("related_searches"),
+            chat2api.get("related_searches"),
             message.get("relatedSearches"),
             response.get("relatedSearches"),
         )),
         "citations": citations,
+        "videos": first_non_empty(
+            chat2api.get("videos"),
+            message.get("videos"),
+            response.get("videos"),
+        ) or [],
         "shareUrl": clean_text(first_non_empty(chat2api.get("share_url"), chat2api.get("shareUrl"), message.get("share_url"), response.get("share_url"), message.get("shareUrl"), response.get("shareUrl"))),
         "shareId": clean_text(first_non_empty(chat2api.get("share_id"), chat2api.get("shareId"))),
         "conversationUrl": clean_text(first_non_empty(chat2api.get("conversation_url"), chat2api.get("conversationUrl"))),
@@ -971,7 +980,7 @@ def main() -> int:
         })
     response = post_chat_completion(chat_endpoint(args.base_url), payload, args.api_key, args.timeout, debug_raw)
     structured = extract_structured_fields(response)
-    if platform_id == "kimi":
+    if platform_id in ("kimi", "qwen"):
         structured["citations"] = filter_cited_citations(structured["answer"], structured["citations"], platform_id)
 
     # 从服务端写入的 debug trace 事件中提取用户快照和 proxy 快照
@@ -994,6 +1003,7 @@ def main() -> int:
         "searchQueries": structured["searchQueries"],
         "relatedSearches": structured["relatedSearches"],
         "citations": structured["citations"],
+        "videos": structured["videos"],
         "shareUrl": structured["shareUrl"],
         "shareId": structured["shareId"],
         "conversationUrl": structured["conversationUrl"],
