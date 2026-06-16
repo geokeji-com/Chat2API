@@ -30,6 +30,7 @@ MESSAGE_EXTRA_KEYS = {
     "shareUrl",
 }
 CITATION_MARKER_RE = re.compile(r"\[citation:(\d+)\]")
+KIMI_CITE_REF_RE = re.compile(r"(?:cite)?web_search:\d+#(\d+)")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DEBUG_LOG_DIR = os.path.join(PROJECT_ROOT, "logs", "platform-calls")
 SENSITIVE_KEY_RE = re.compile(r"authorization|cookie|token|secret|password|credential|x-ds-pow-response|set-cookie", re.I)
@@ -254,14 +255,19 @@ def resolve_proxy_city(city: str, nodes: list[dict[str, Any]] | None) -> tuple[s
 def resolve_model(platform_id: str, default_model: str, args: argparse.Namespace) -> str:
     requested_model = args.model or default_model
 
-    if platform_id != "deepseek" or args.model:
+    if args.model:
         return requested_model
 
-    if getattr(args, "expert", False):
-        return "deepseek-expert"
+    if platform_id == "deepseek":
+        if getattr(args, "expert", False):
+            return "deepseek-expert"
+        if args.web_search:
+            return f"{requested_model}-search"
 
-    if args.web_search:
-        return f"{requested_model}-search"
+    elif platform_id == "kimi":
+        if args.web_search:
+            return f"{requested_model}-search"
+
     return requested_model
 
 
@@ -701,12 +707,33 @@ def normalize_citations(value: Any) -> list[dict[str, Any]]:
             "snippet": pick_text(item, ["snippet", "summary", "content", "text", "description", "abstract", "passage", "quote"]),
             "platform": pick_text(item, ["site_name", "siteName", "platform", "source", "source_name", "website", "host", "domain"]),
             "publishedAt": first_defined(item.get("published_at"), item.get("publishedAt"), item.get("publish_time"), item.get("date")),
-            "siteIcon": pick_text(item, ["site_icon", "siteIcon", "icon", "favicon"]),
+            "siteIcon": pick_text(item, ["site_icon", "siteIcon", "iconUrl", "icon_url", "icon", "favicon"]),
         })
     return normalized
 
 
-def render_citation_markers(text: str, citations: list[dict[str, Any]]) -> str:
+def filter_cited_citations(answer: str, citations: list[dict[str, Any]], platform_id: str) -> list[dict[str, Any]]:
+    if not citations or not answer:
+        return citations
+
+    cited_indexes: set[int] = set()
+
+    # [citation:N] — 1-based
+    for m in CITATION_MARKER_RE.finditer(answer):
+        cited_indexes.add(int(m.group(1)))
+
+    # Kimi: web_search:1#N / citeweb_search:1#N — 0-based ref → 1-based index
+    if platform_id == "kimi":
+        for m in KIMI_CITE_REF_RE.finditer(answer):
+            cited_indexes.add(int(m.group(1)) + 1)
+
+    if not cited_indexes:
+        return []
+
+    return [c for c in citations if isinstance(c.get("index"), int) and c["index"] in cited_indexes]
+
+
+
     if not text:
         return ""
 
@@ -944,6 +971,8 @@ def main() -> int:
         })
     response = post_chat_completion(chat_endpoint(args.base_url), payload, args.api_key, args.timeout, debug_raw)
     structured = extract_structured_fields(response)
+    if platform_id == "kimi":
+        structured["citations"] = filter_cited_citations(structured["answer"], structured["citations"], platform_id)
 
     # 从服务端写入的 debug trace 事件中提取用户快照和 proxy 快照
     user_snapshot, proxy_snapshot = extract_snapshots_from_debug_log(debug_log_file) if debug_raw else ({}, None)
