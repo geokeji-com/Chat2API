@@ -19,12 +19,15 @@ export interface YuanbaoResponseMetadata {
   message_id: string
   conversation_url: string
   share_url: string
+  share_id: string
   answer_content: string
   reasoning_content: string
   citations: any[] | string
   source_list: any[] | string
   search_results: { keywords: string[]; webPages: any[] } | string
   related_searches: string[] | string
+  videos: any[]
+  search_queries: string[]
 }
 
 function contentToText(content: ChatMessage['content']): string {
@@ -42,43 +45,66 @@ function buildPrompt(messages: ChatMessage[]): string {
   }).filter(Boolean).join('\n\n')
 }
 
-function resolveModel(model: string, thinking: boolean): { model: string; chatModelId: string; subModelId: string } {
+function resolveModel(model: string, thinking: boolean): { model: string; modelExtId: string; chatModelId: string; subModelId: string } {
   const normalized = model.toLowerCase()
   if (normalized.includes('deepseek')) {
     const r1 = thinking || normalized.includes('r1')
-    return { model: r1 ? 'deep_seek' : 'deep_seek_v3', chatModelId: r1 ? 'deep_seek' : 'deep_seek_v3', subModelId: '' }
+    const m = r1 ? 'deep_seek' : 'deep_seek_v3'
+    return { model: m, modelExtId: m, chatModelId: m, subModelId: '' }
   }
   const t1 = thinking || normalized.includes('t1')
-  return { model: 'gpt_175B_0404', chatModelId: t1 ? 'hunyuan_t1' : 'hunyuan_gpt_175B_0404', subModelId: t1 ? 'hunyuan_t1' : '' }
+  return {
+    model: 'gpt_175B_0404',
+    modelExtId: 'hunyuan_gpt_175B_0404',
+    chatModelId: t1 ? 'hunyuan_t1' : 'hunyuan_gpt_175B_0404',
+    subModelId: t1 ? 'hunyuan_t1' : '',
+  }
 }
 
-export function collectYuanbaoDetailMetadata(detail: any): Pick<YuanbaoResponseMetadata, 'answer_content' | 'reasoning_content' | 'citations' | 'source_list' | 'search_results'> {
+export function collectYuanbaoDetailMetadata(detail: any): Pick<YuanbaoResponseMetadata, 'answer_content' | 'reasoning_content' | 'citations' | 'source_list' | 'search_results' | 'videos' | 'search_queries'> {
   const reasoning: string[] = []
   const answer: string[] = []
   const citations: any[] = []
+  const videos: any[] = []
   const seenUrls = new Set<string>()
   const speeches = (detail?.convs || []).flatMap((conv: any) => conv?.speechesV2 || conv?.spechesV2 || [])
 
-  const addDocs = (docs: any) => {
+  const addDocs = (docs: any, overwrite = false) => {
     if (!Array.isArray(docs)) return
     for (const doc of docs) {
-      if (!doc || typeof doc.url !== 'string' || typeof doc.title !== 'string' || seenUrls.has(doc.url)) continue
-      seenUrls.add(doc.url)
-      citations.push({ ...doc, index: Number.isFinite(doc.index) ? doc.index : citations.length + 1 })
+      if (!doc || typeof doc.url !== 'string' || typeof doc.title !== 'string') continue
+      const ext = doc.invisibleExt && typeof doc.invisibleExt === 'object' ? doc.invisibleExt : {}
+      const merged = { ...ext, ...doc, index: Number.isFinite(doc.index) ? doc.index : citations.length + 1 }
+      const existingIdx = citations.findIndex((c: any) => c.url === doc.url)
+      if (existingIdx >= 0) {
+        if (overwrite) citations[existingIdx] = merged
+      } else {
+        seenUrls.add(doc.url)
+        citations.push(merged)
+      }
     }
   }
 
   for (const speech of speeches) {
+    // collect videos from speech.extra.replaces
+    for (const replace of speech?.extra?.replaces || []) {
+      for (const media of replace?.multimedias || []) {
+        if (media?.type === 'videoBoxV2') videos.push(media)
+      }
+    }
+
     for (const item of speech?.content || []) {
-      addDocs(item?.docs)
       if (item?.type === 'deepSearch') {
         for (const component of item?.contents || []) {
           if (component?.type === 'text' && typeof component.msg === 'string' && component.msg) reasoning.push(component.msg)
-          addDocs(component?.docs)
+          if (component?.type !== 'toolCall') addDocs(component?.docs)
         }
         continue
       }
-      if (item?.type === 'searchGuid') continue
+      if (item?.type === 'searchGuid') {
+        addDocs(item?.docs, true)
+        continue
+      }
       for (const key of ['msg', 'text', 'content', 'markdown']) {
         if (typeof item?.[key] === 'string' && item[key]) {
           answer.push(item[key])
@@ -95,6 +121,8 @@ export function collectYuanbaoDetailMetadata(detail: any): Pick<YuanbaoResponseM
     citations: citationValue,
     source_list: citationValue,
     search_results: citations.length > 0 ? { keywords: [], webPages: citations } : '',
+    videos,
+    search_queries: [],
   }
 }
 
@@ -148,7 +176,7 @@ export class YuanbaoAdapter {
       multimedia: [],
       supportHint: 1,
       chatModelExtInfo: JSON.stringify({
-        modelId: modelInfo.model,
+        modelId: modelInfo.modelExtId,
         subModelId: modelInfo.subModelId,
         supportFunctions: { internetSearch: '' },
         internetSearch,
@@ -188,7 +216,10 @@ export class YuanbaoAdapter {
       message_id: messageId || '',
       conversation_url: `${BASE_URL}/chat/${this.agentId}/${sessionId}`,
       share_url: '',
+      share_id: '',
       answer_content: '', reasoning_content: '', citations: '', source_list: '', search_results: '', related_searches: '',
+      videos: [],
+      search_queries: [],
     }
     const headers = this.createHeaders(`${this.agentId}/${sessionId}`)
     let detail: any
@@ -234,6 +265,19 @@ export class YuanbaoAdapter {
       } catch (error) {
         console.warn('[Yuanbao] Failed to fetch related searches:', error)
       }
+    }
+    try {
+      const shareResponse = await this.client.post(`${BASE_URL}/api/conversations/v2/share`, {
+        conversationId: sessionId, agentId: this.agentId,
+        conversations: [], selectAll: true, excludeIndexes: [], nickname: '', platform: '',
+      }, { headers })
+      const shareId = shareResponse.data?.shareId
+      if (typeof shareId === 'string' && shareId) {
+        result.share_id = shareId
+        result.share_url = `https://yb.tencent.com/s/${shareId}`
+      }
+    } catch (error) {
+      console.warn('[Yuanbao] Failed to fetch share info:', error)
     }
     return result
   }
