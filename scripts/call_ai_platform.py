@@ -84,7 +84,7 @@ def parse_args() -> argparse.Namespace:
             "Examples:\n"
             "  python3 scripts/call_ai_platform.py 豆包 \"查询词\"\n"
             "  python3 scripts/call_ai_platform.py 豆包 \"查询词\" --city 上海\n"
-            "  python3 scripts/call_ai_platform.py --platform deepseek --query \"你好\" --thinking\n"
+            "  python3 scripts/call_ai_platform.py --platform deepseek --query \"你好\" --expert\n"
             "  python3 scripts/call_ai_platform.py --input-json '{\"platform\":\"豆包\",\"query\":\"查询词\",\"city\":\"上海\"}'\n"
             "  python3 scripts/call_ai_platform.py --list-platforms\n"
         ),
@@ -120,12 +120,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--create-time", help="Optional create time for output envelope.")
     parser.add_argument("--city", default=os.getenv("CHAT2API_CITY"), help="Optional proxy-pool target city, e.g. 上海.")
     parser.add_argument("--web-search", action="store_true", help="Set request web_search=true.")
-    parser.add_argument("--thinking", action="store_true", help="Enable provider thinking mode when supported.")
+    parser.add_argument("--expert", action="store_true", help="DeepSeek only: use expert model (R1, no web search).")
     parser.add_argument("--raw", action="store_true", help="Include raw OpenAI-compatible response.")
     parser.add_argument(
-        "--debug-raw",
+        "--no-debug-raw",
         action="store_true",
-        help="Write raw request/response debug data to a log file.",
+        help="Disable raw request/response debug logging (enabled by default).",
     )
     parser.add_argument(
         "--debug-log-file",
@@ -236,19 +236,19 @@ def fetch_proxy_nodes(base_url: str, management_secret: str | None, timeout: flo
     return nodes if isinstance(nodes, list) else None
 
 
-def resolve_proxy_city(city: str, nodes: list[dict[str, Any]] | None) -> tuple[str, str]:
+def resolve_proxy_city(city: str, nodes: list[dict[str, Any]] | None) -> tuple[str, str, dict[str, Any] | None]:
     if not city:
-        return "", "not_requested"
+        return "", "not_requested", None
     if nodes is None:
-        return city, "sent_unverified"
+        return city, "sent_unverified", None
 
     requested = normalize_city(city)
     for node in nodes:
         if not isinstance(node, dict) or not is_assignable_proxy_node(node):
             continue
         if normalize_city(node.get("city")) == requested:
-            return city, "matched"
-    return "", "ignored_not_in_proxy_pool"
+            return city, "matched", node
+    return "", "ignored_not_in_proxy_pool", None
 
 
 def resolve_model(platform_id: str, default_model: str, args: argparse.Namespace) -> str:
@@ -257,16 +257,15 @@ def resolve_model(platform_id: str, default_model: str, args: argparse.Namespace
     if platform_id != "deepseek" or args.model:
         return requested_model
 
-    if args.thinking and args.web_search:
-        return f"{requested_model}-think-search"
-    if args.thinking:
-        return f"{requested_model}-think"
+    if getattr(args, "expert", False):
+        return "deepseek-expert"
+
     if args.web_search:
         return f"{requested_model}-search"
     return requested_model
 
 
-def build_payload(query: str, model: str, proxy_city: str, args: argparse.Namespace, debug_log_file: str = "") -> dict[str, Any]:
+def build_payload(query: str, model: str, proxy_city: str, args: argparse.Namespace, debug_log_file: str = "", debug_raw: bool = False) -> dict[str, Any]:
     messages: list[dict[str, str]] = []
     if args.system:
         messages.append({"role": "system", "content": args.system})
@@ -282,7 +281,7 @@ def build_payload(query: str, model: str, proxy_city: str, args: argparse.Namesp
         payload["stream_options"] = {"include_final_response": True}
     if args.web_search:
         payload["web_search"] = True
-    if args.debug_raw:
+    if debug_raw:
         payload["chat2api_debug_raw"] = True
         if debug_log_file:
             payload["chat2api_debug_log_file"] = debug_log_file
@@ -689,7 +688,6 @@ def normalize_citations(value: Any) -> list[dict[str, Any]]:
                 "platform": "",
                 "publishedAt": None,
                 "siteIcon": "",
-                "raw": item,
             })
             continue
 
@@ -704,7 +702,6 @@ def normalize_citations(value: Any) -> list[dict[str, Any]]:
             "platform": pick_text(item, ["site_name", "siteName", "platform", "source", "source_name", "website", "host", "domain"]),
             "publishedAt": first_defined(item.get("published_at"), item.get("publishedAt"), item.get("publish_time"), item.get("date")),
             "siteIcon": pick_text(item, ["site_icon", "siteIcon", "icon", "favicon"]),
-            "raw": item,
         })
     return normalized
 
@@ -759,8 +756,8 @@ def extract_structured_fields(response: dict[str, Any]) -> dict[str, Any]:
         response.get("searchResults"),
     )
     citations = normalize_citations(citations_source)
-    answer = render_citation_markers(extract_answer(response), citations)
-    reasoning_content = render_citation_markers(clean_text(message.get("reasoning_content")), citations)
+    answer = extract_answer(response)
+    reasoning_content = clean_text(message.get("reasoning_content"))
     message_ids = first_non_empty(chat2api.get("message_ids"), chat2api.get("messageIds"))
 
     return {
@@ -785,6 +782,46 @@ def extract_structured_fields(response: dict[str, Any]) -> dict[str, Any]:
         "sessionId": clean_text(first_non_empty(chat2api.get("session_id"), chat2api.get("sessionId"))),
         "messageIds": message_ids if isinstance(message_ids, list) else [],
     }
+
+
+def extract_snapshots_from_debug_log(log_path: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """从服务端写入同一日志文件的 debug trace 事件中提取用户快照和 proxy 快照。"""
+    user_snapshot: dict[str, Any] = {}
+    proxy_snapshot: dict[str, Any] | None = None
+
+    try:
+        with open(log_path, "r", encoding="utf-8") as file:
+            for raw_line in file:
+                try:
+                    entry = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+
+                if proxy_snapshot is None and isinstance(entry.get("proxy"), dict):
+                    proxy_snapshot = {
+                        k: v for k, v in entry["proxy"].items()
+                        if not SENSITIVE_KEY_RE.search(k)
+                    }
+
+                if "users.current.response" in entry.get("event", "") and not user_snapshot:
+                    data = entry.get("data") or {}
+                    biz_data = (
+                        data.get("data", {}).get("biz_data")
+                        or data.get("biz_data")
+                    )
+                    if isinstance(biz_data, dict):
+                        chat = biz_data.get("chat") or {}
+                        for key in ("id", "email", "mobile_number"):
+                            if key in biz_data:
+                                user_snapshot[key] = biz_data[key]
+                        if "is_muted" in chat:
+                            user_snapshot["is_muted"] = chat["is_muted"]
+                        if "mute_until" in chat:
+                            user_snapshot["mute_until"] = chat["mute_until"]
+    except (OSError, IOError):
+        pass
+
+    return user_snapshot, proxy_snapshot
 
 
 def now_string() -> str:
@@ -889,11 +926,12 @@ def main() -> int:
     platform_id, platform_config = resolve_platform(str(platform))
     model = resolve_model(platform_id, str(platform_config["model"]), args)
     main_task_id = args.main_task_id or task.get("mainTaskId") or str(uuid.uuid4())
-    debug_log_file = resolve_debug_log_path(args.debug_log_file, platform_id, main_task_id) if args.debug_raw else ""
+    debug_raw = not args.no_debug_raw
+    debug_log_file = resolve_debug_log_path(args.debug_log_file, platform_id, main_task_id) if debug_raw else ""
     proxy_nodes = fetch_proxy_nodes(args.base_url, args.management_secret, args.timeout)
-    proxy_city, city_status = resolve_proxy_city(city, proxy_nodes)
-    payload = build_payload(str(query), model, proxy_city, args, debug_log_file)
-    if args.debug_raw:
+    proxy_city, city_status, matched_proxy_node = resolve_proxy_city(city, proxy_nodes)
+    payload = build_payload(str(query), model, proxy_city, args, debug_log_file, debug_raw)
+    if debug_raw:
         append_debug_log_event(debug_log_file, "script.request", {
             "mainTaskId": main_task_id,
             "platform": platform_config["label"],
@@ -904,32 +942,44 @@ def main() -> int:
                 "payload": payload,
             },
         })
-    response = post_chat_completion(chat_endpoint(args.base_url), payload, args.api_key, args.timeout, args.debug_raw)
+    response = post_chat_completion(chat_endpoint(args.base_url), payload, args.api_key, args.timeout, debug_raw)
     structured = extract_structured_fields(response)
 
+    # 从服务端写入的 debug trace 事件中提取用户快照和 proxy 快照
+    user_snapshot, proxy_snapshot = extract_snapshots_from_debug_log(debug_log_file) if debug_raw else ({}, None)
+
+    create_time = args.create_time or task.get("createTime") or now_string()
     result: dict[str, Any] = {
         "mainTaskId": main_task_id,
         "platform": platform_config["label"],
         "platformId": platform_id,
         "enterpriseId": args.enterprise_id or task.get("enterpriseId") or "",
-        "createTime": args.create_time or task.get("createTime") or now_string(),
+        "createTime": create_time,
         "query": str(query),
         "city": city,
         "proxyCity": proxy_city,
         "cityStatus": city_status,
         "model": model,
-        **structured,
-        "finishReason": extract_finish_reason(response),
-        "usage": response.get("usage"),
+        "answer": structured["answer"],
+        "reasoningContent": structured["reasoningContent"],
+        "searchQueries": structured["searchQueries"],
+        "relatedSearches": structured["relatedSearches"],
+        "citations": structured["citations"],
+        "shareUrl": structured["shareUrl"],
+        "shareId": structured["shareId"],
+        "conversationUrl": structured["conversationUrl"],
+        "sessionId": structured["sessionId"],
+        "userSnapshot": user_snapshot if user_snapshot else None,
+        "proxySnapshot": proxy_snapshot,
     }
-    if args.debug_raw:
+    if debug_raw:
         proxy_debug = response.get("__chat2api_debug")
         provider_debug = response.get("chat2api_debug")
-        log_path, log_bytes = append_debug_log_event(debug_log_file, "script.result", {
+        append_debug_log_event(debug_log_file, "script.result", {
             "mainTaskId": main_task_id,
             "platform": platform_config["label"],
             "platformId": platform_id,
-            "createTime": result["createTime"],
+            "createTime": create_time,
             "query": str(query),
             "response": {
                 "structured": result,
@@ -940,14 +990,6 @@ def main() -> int:
                 "provider": provider_debug,
             },
         })
-        result["debug"] = {
-            "logPath": log_path,
-            "logBytes": log_bytes,
-            "rawResponseCounts": {
-                "proxySseEvents": raw_event_count(proxy_debug, "raw_sse_events"),
-                "providerUpstreamEvents": raw_event_count(provider_debug, "raw_upstream_events"),
-            },
-        }
     if args.raw:
         result["raw"] = response
 
