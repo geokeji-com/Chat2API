@@ -7,11 +7,32 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
 import uuid
 from typing import Any
+
+STANDARD_CHUNK_KEYS = {"id", "object", "created", "model", "choices", "usage"}
+MESSAGE_EXTRA_KEYS = {
+    "citations",
+    "references",
+    "sources",
+    "source_list",
+    "search_results",
+    "searchResults",
+    "search_queries",
+    "searchQueries",
+    "related_searches",
+    "relatedSearches",
+    "share_url",
+    "shareUrl",
+}
+CITATION_MARKER_RE = re.compile(r"\[citation:(\d+)\]")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_DEBUG_LOG_DIR = os.path.join(PROJECT_ROOT, "logs", "platform-calls")
+SENSITIVE_KEY_RE = re.compile(r"authorization|cookie|token|secret|password|credential|x-ds-pow-response|set-cookie", re.I)
 
 
 PLATFORMS: dict[str, dict[str, Any]] = {
@@ -63,7 +84,7 @@ def parse_args() -> argparse.Namespace:
             "Examples:\n"
             "  python3 scripts/call_ai_platform.py 豆包 \"查询词\"\n"
             "  python3 scripts/call_ai_platform.py 豆包 \"查询词\" --city 上海\n"
-            "  python3 scripts/call_ai_platform.py --platform deepseek --query \"你好\"\n"
+            "  python3 scripts/call_ai_platform.py --platform deepseek --query \"你好\" --thinking\n"
             "  python3 scripts/call_ai_platform.py --input-json '{\"platform\":\"豆包\",\"query\":\"查询词\",\"city\":\"上海\"}'\n"
             "  python3 scripts/call_ai_platform.py --list-platforms\n"
         ),
@@ -99,12 +120,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--create-time", help="Optional create time for output envelope.")
     parser.add_argument("--city", default=os.getenv("CHAT2API_CITY"), help="Optional proxy-pool target city, e.g. 上海.")
     parser.add_argument("--web-search", action="store_true", help="Set request web_search=true.")
-    parser.add_argument(
-        "--reasoning-effort",
-        choices=["low", "medium", "high"],
-        help="Set request reasoning_effort.",
-    )
+    parser.add_argument("--thinking", action="store_true", help="Enable provider thinking mode when supported.")
     parser.add_argument("--raw", action="store_true", help="Include raw OpenAI-compatible response.")
+    parser.add_argument(
+        "--debug-raw",
+        action="store_true",
+        help="Write raw request/response debug data to a log file.",
+    )
+    parser.add_argument(
+        "--debug-log-file",
+        help=f"Debug raw JSONL log file path. Default: {DEFAULT_DEBUG_LOG_DIR}/<platform>-<timestamp>-<taskId>.jsonl",
+    )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Debug override: request non-streaming JSON instead of the default silent stream.",
+    )
     parser.add_argument("--list-platforms", action="store_true", help="Print supported platform names and exit.")
     return parser.parse_args()
 
@@ -220,30 +251,51 @@ def resolve_proxy_city(city: str, nodes: list[dict[str, Any]] | None) -> tuple[s
     return "", "ignored_not_in_proxy_pool"
 
 
-def build_payload(query: str, model: str, proxy_city: str, args: argparse.Namespace) -> dict[str, Any]:
+def resolve_model(platform_id: str, default_model: str, args: argparse.Namespace) -> str:
+    requested_model = args.model or default_model
+
+    if platform_id != "deepseek" or args.model:
+        return requested_model
+
+    if args.thinking and args.web_search:
+        return f"{requested_model}-think-search"
+    if args.thinking:
+        return f"{requested_model}-think"
+    if args.web_search:
+        return f"{requested_model}-search"
+    return requested_model
+
+
+def build_payload(query: str, model: str, proxy_city: str, args: argparse.Namespace, debug_log_file: str = "") -> dict[str, Any]:
     messages: list[dict[str, str]] = []
     if args.system:
         messages.append({"role": "system", "content": args.system})
     messages.append({"role": "user", "content": query})
 
+    stream_enabled = not args.no_stream
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "stream": False,
+        "stream": stream_enabled,
     }
+    if stream_enabled:
+        payload["stream_options"] = {"include_final_response": True}
     if args.web_search:
         payload["web_search"] = True
+    if args.debug_raw:
+        payload["chat2api_debug_raw"] = True
+        if debug_log_file:
+            payload["chat2api_debug_log_file"] = debug_log_file
     if proxy_city:
         payload["proxy_city"] = proxy_city
-    if args.reasoning_effort:
-        payload["reasoning_effort"] = args.reasoning_effort
     return payload
 
 
-def post_json(url: str, payload: dict[str, Any], api_key: str | None, timeout: float) -> dict[str, Any]:
+def post_chat_completion(url: str, payload: dict[str, Any], api_key: str | None, timeout: float, debug_raw: bool = False) -> dict[str, Any]:
+    stream_enabled = bool(payload.get("stream"))
     headers = {
         "Content-Type": "application/json",
-        "Accept": "application/json",
+        "Accept": "text/event-stream" if stream_enabled else "application/json",
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -253,6 +305,9 @@ def post_json(url: str, payload: dict[str, Any], api_key: str | None, timeout: f
 
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
+            content_type = response.headers.get("Content-Type", "")
+            if "text/event-stream" in content_type:
+                return read_sse_final_response(response, debug_raw)
             text = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
@@ -267,18 +322,250 @@ def post_json(url: str, payload: dict[str, Any], api_key: str | None, timeout: f
 
     if not isinstance(data, dict):
         raise SystemExit(f"Unexpected response: {data!r}")
+    if debug_raw:
+        data["__chat2api_debug"] = {
+            "raw_response_text": text,
+        }
     return data
 
 
-def extract_answer(response: dict[str, Any]) -> str:
+def read_sse_final_response(response: Any, debug_raw: bool = False) -> dict[str, Any]:
+    state = create_stream_state()
+    final_response: dict[str, Any] | None = None
+    event_lines: list[str] = []
+    raw_events: list[str] = []
+
+    def process_event() -> None:
+        nonlocal final_response, event_lines
+        data = extract_sse_data(event_lines)
+        event_lines = []
+        if not data or data == "[DONE]":
+            return
+
+        if debug_raw:
+            raw_events.append(data)
+
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            return
+
+        if not isinstance(chunk, dict):
+            return
+
+        candidate = chunk.get("final_response")
+        if isinstance(candidate, dict):
+            final_response = candidate
+            add_stream_chunk(state, chunk)
+            return
+
+        add_stream_chunk(state, chunk)
+
+    for raw_line in response:
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if line == "":
+            process_event()
+        else:
+            event_lines.append(line)
+
+    if event_lines:
+        process_event()
+
+    aggregated = create_response_from_stream_state(state)
+    result = merge_final_response_with_aggregated(final_response, aggregated) if final_response else aggregated
+    if debug_raw:
+        result["__chat2api_debug"] = {
+            "raw_sse_events": raw_events,
+        }
+    return result
+
+
+def extract_sse_data(event_lines: list[str]) -> str | None:
+    data_lines: list[str] = []
+    for line in event_lines:
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            data = line[5:]
+            data_lines.append(data[1:] if data.startswith(" ") else data)
+    return "\n".join(data_lines) if data_lines else None
+
+
+def create_stream_state() -> dict[str, Any]:
+    return {
+        "id": "",
+        "model": "",
+        "created": int(dt.datetime.now().timestamp()),
+        "content": "",
+        "reasoning_content": "",
+        "finish_reason": None,
+        "usage": None,
+        "message_extras": {},
+        "response_extras": {},
+        "tool_calls": [],
+    }
+
+
+def add_stream_chunk(state: dict[str, Any], chunk: dict[str, Any]) -> None:
+    if isinstance(chunk.get("id"), str) and chunk["id"]:
+        state["id"] = chunk["id"]
+    if isinstance(chunk.get("model"), str) and chunk["model"]:
+        state["model"] = chunk["model"]
+    if isinstance(chunk.get("created"), int):
+        state["created"] = chunk["created"]
+    if isinstance(chunk.get("usage"), dict):
+        state["usage"] = chunk["usage"]
+
+    collect_provider_extras(state, chunk)
+
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return
+
+    choice = choices[0]
+    if choice.get("finish_reason"):
+        state["finish_reason"] = choice.get("finish_reason")
+
+    delta = choice.get("delta")
+    if isinstance(delta, dict):
+        append_message_parts(state, delta)
+
+    message = choice.get("message")
+    if isinstance(message, dict):
+        append_message_parts(state, message)
+        for key in MESSAGE_EXTRA_KEYS:
+            if key in message:
+                state["message_extras"][key] = message[key]
+
+
+def append_message_parts(state: dict[str, Any], message_part: dict[str, Any]) -> None:
+    content = message_part.get("content")
+    if isinstance(content, str):
+        state["content"] += content
+    reasoning_content = message_part.get("reasoning_content")
+    if isinstance(reasoning_content, str):
+        state["reasoning_content"] += reasoning_content
+    tool_calls = message_part.get("tool_calls")
+    if isinstance(tool_calls, list):
+        merge_tool_calls(state["tool_calls"], tool_calls)
+
+
+def collect_provider_extras(state: dict[str, Any], chunk: dict[str, Any]) -> None:
+    for key, value in chunk.items():
+        if value is None or key in STANDARD_CHUNK_KEYS:
+            continue
+        if key in MESSAGE_EXTRA_KEYS:
+            state["message_extras"][key] = value
+        else:
+            state["response_extras"][key] = value
+
+
+def merge_tool_calls(target: list[dict[str, Any]], delta_tool_calls: list[Any]) -> None:
+    for delta_tool_call in delta_tool_calls:
+        if not isinstance(delta_tool_call, dict):
+            continue
+
+        index = delta_tool_call.get("index")
+        if not isinstance(index, int):
+            index = len(target)
+
+        tool_call = next((item for item in target if item.get("index") == index), None)
+        if tool_call is None:
+            tool_call = {
+                "index": index,
+                "id": "",
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            }
+            target.append(tool_call)
+
+        if delta_tool_call.get("id"):
+            tool_call["id"] = delta_tool_call["id"]
+        if delta_tool_call.get("type"):
+            tool_call["type"] = delta_tool_call["type"]
+
+        function_delta = delta_tool_call.get("function")
+        if isinstance(function_delta, dict):
+            if function_delta.get("name"):
+                tool_call["function"]["name"] = function_delta["name"]
+            if function_delta.get("arguments"):
+                tool_call["function"]["arguments"] += str(function_delta["arguments"])
+
+
+def create_response_from_stream_state(state: dict[str, Any]) -> dict[str, Any]:
+    tool_calls = [
+        {key: value for key, value in tool_call.items() if key != "index"}
+        for tool_call in sorted(state["tool_calls"], key=lambda item: item.get("index", 0))
+    ]
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": None if tool_calls else (state["content"] or None),
+    }
+    if state["reasoning_content"]:
+        message["reasoning_content"] = state["reasoning_content"]
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    message.update(state["message_extras"])
+
+    finish_reason = state["finish_reason"] or ("tool_calls" if tool_calls else "stop")
+    response = {
+        "id": state["id"],
+        "object": "chat.completion",
+        "created": state["created"],
+        "model": state["model"],
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+        "usage": state["usage"],
+    }
+    response.update(state["response_extras"])
+    return response
+
+
+def merge_missing_extras(target: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    result = {**target}
+    for key in MESSAGE_EXTRA_KEYS:
+        if result.get(key) in (None, "", [], {}) and fallback.get(key) not in (None, "", [], {}):
+            result[key] = fallback[key]
+    return result
+
+
+def merge_final_response_with_aggregated(final_response: dict[str, Any], aggregated: dict[str, Any]) -> dict[str, Any]:
+    result = {**aggregated, **final_response}
+
+    final_message = extract_message(final_response)
+    aggregated_message = extract_message(aggregated)
+    if final_message or aggregated_message:
+        merged_message = merge_missing_extras(final_message, aggregated_message)
+        if merged_message.get("content") in (None, "") and aggregated_message.get("content") not in (None, ""):
+            merged_message["content"] = aggregated_message.get("content")
+        if merged_message.get("reasoning_content") in (None, "") and aggregated_message.get("reasoning_content") not in (None, ""):
+            merged_message["reasoning_content"] = aggregated_message.get("reasoning_content")
+
+        choices = result.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            result["choices"] = [
+                {
+                    **choices[0],
+                    "message": merged_message,
+                },
+                *choices[1:],
+            ]
+
+    for key in MESSAGE_EXTRA_KEYS:
+        if result.get(key) in (None, "", [], {}) and aggregated.get(key) not in (None, "", [], {}):
+            result[key] = aggregated[key]
+    return result
+
+
+def extract_message(response: dict[str, Any]) -> dict[str, Any]:
     choices = response.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return ""
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return {}
+    message = choices[0].get("message")
+    return message if isinstance(message, dict) else {}
 
-    message = choices[0].get("message") if isinstance(choices[0], dict) else None
-    if not isinstance(message, dict):
-        return ""
 
+def extract_answer(response: dict[str, Any]) -> str:
+    message = extract_message(response)
     content = message.get("content")
     if isinstance(content, str):
         return content
@@ -300,8 +587,273 @@ def extract_finish_reason(response: dict[str, Any]) -> Any:
     return choices[0].get("finish_reason")
 
 
+def first_defined(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value in (None, "", [], {}):
+            continue
+        return value
+    return None
+
+
+def pick_text(record: dict[str, Any], keys: list[str]) -> str:
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if value is not None and not isinstance(value, (dict, list)):
+            text = str(value).strip()
+            if text:
+                return text
+    return ""
+
+
+def pick_int(*values: Any) -> int | None:
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+    return None
+
+
+def normalize_text_list(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+
+    entries = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for entry in entries:
+        text = ""
+        if isinstance(entry, str):
+            text = entry.strip()
+        elif isinstance(entry, dict):
+            text = pick_text(entry, ["query", "question", "text", "content", "title"])
+        elif entry is not None:
+            text = str(entry).strip()
+
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+
+    return result
+
+
+def citation_entries(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        for key in [
+            "citations",
+            "references",
+            "sources",
+            "source_list",
+            "results",
+            "search_results",
+            "searchResults",
+            "items",
+            "list",
+        ]:
+            nested = value.get(key)
+            if isinstance(nested, list):
+                return nested
+        if value.get("url") or value.get("title"):
+            return [value]
+    return []
+
+
+def normalize_citations(value: Any) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in citation_entries(value):
+        if not isinstance(item, dict):
+            normalized.append({
+                "index": None,
+                "citeIndex": None,
+                "url": "",
+                "title": "",
+                "snippet": str(item),
+                "platform": "",
+                "publishedAt": None,
+                "siteIcon": "",
+                "raw": item,
+            })
+            continue
+
+        index = pick_int(item.get("index"), item.get("cite_index"), item.get("citeIndex"), item.get("ref_num"), item.get("ref"))
+        cite_index = pick_int(item.get("cite_index"), item.get("citeIndex"), item.get("index"), item.get("ref_num"), item.get("ref"))
+        normalized.append({
+            "index": index,
+            "citeIndex": cite_index,
+            "url": pick_text(item, ["url", "href", "link"]),
+            "title": pick_text(item, ["title", "name"]),
+            "snippet": pick_text(item, ["snippet", "summary", "content", "text", "description", "abstract", "passage", "quote"]),
+            "platform": pick_text(item, ["site_name", "siteName", "platform", "source", "source_name", "website", "host", "domain"]),
+            "publishedAt": first_defined(item.get("published_at"), item.get("publishedAt"), item.get("publish_time"), item.get("date")),
+            "siteIcon": pick_text(item, ["site_icon", "siteIcon", "icon", "favicon"]),
+            "raw": item,
+        })
+    return normalized
+
+
+def render_citation_markers(text: str, citations: list[dict[str, Any]]) -> str:
+    if not text:
+        return ""
+
+    by_index: dict[int, dict[str, Any]] = {}
+    for citation in citations:
+        for key in ("citeIndex", "index"):
+            value = citation.get(key)
+            if isinstance(value, int) and value not in by_index:
+                by_index[value] = citation
+
+    def replace(match: re.Match[str]) -> str:
+        cite_index = int(match.group(1))
+        citation = by_index.get(cite_index)
+        if not citation:
+            return f"[{cite_index}]"
+
+        url = clean_text(citation.get("url"))
+        if not url:
+            return f"[{cite_index}]"
+        return f"[{cite_index}](<{url}>)"
+
+    return CITATION_MARKER_RE.sub(replace, text)
+
+
+def extract_chat2api(response: dict[str, Any], message: dict[str, Any]) -> dict[str, Any]:
+    for value in (response.get("chat2api"), message.get("chat2api")):
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def extract_structured_fields(response: dict[str, Any]) -> dict[str, Any]:
+    message = extract_message(response)
+    chat2api = extract_chat2api(response, message)
+    citations_source = first_non_empty(
+        message.get("citations"),
+        response.get("citations"),
+        message.get("references"),
+        response.get("references"),
+        message.get("sources"),
+        response.get("sources"),
+        message.get("source_list"),
+        response.get("source_list"),
+        message.get("search_results"),
+        response.get("search_results"),
+        message.get("searchResults"),
+        response.get("searchResults"),
+    )
+    citations = normalize_citations(citations_source)
+    answer = render_citation_markers(extract_answer(response), citations)
+    reasoning_content = render_citation_markers(clean_text(message.get("reasoning_content")), citations)
+    message_ids = first_non_empty(chat2api.get("message_ids"), chat2api.get("messageIds"))
+
+    return {
+        "answer": answer,
+        "reasoningContent": reasoning_content,
+        "searchQueries": normalize_text_list(first_non_empty(
+            message.get("search_queries"),
+            response.get("search_queries"),
+            message.get("searchQueries"),
+            response.get("searchQueries"),
+        )),
+        "relatedSearches": normalize_text_list(first_non_empty(
+            message.get("related_searches"),
+            response.get("related_searches"),
+            message.get("relatedSearches"),
+            response.get("relatedSearches"),
+        )),
+        "citations": citations,
+        "shareUrl": clean_text(first_non_empty(chat2api.get("share_url"), chat2api.get("shareUrl"), message.get("share_url"), response.get("share_url"), message.get("shareUrl"), response.get("shareUrl"))),
+        "shareId": clean_text(first_non_empty(chat2api.get("share_id"), chat2api.get("shareId"))),
+        "conversationUrl": clean_text(first_non_empty(chat2api.get("conversation_url"), chat2api.get("conversationUrl"))),
+        "sessionId": clean_text(first_non_empty(chat2api.get("session_id"), chat2api.get("sessionId"))),
+        "messageIds": message_ids if isinstance(message_ids, list) else [],
+    }
+
+
 def now_string() -> str:
     return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def slugify_filename(value: Any) -> str:
+    text = clean_text(value)
+    text = re.sub(r"[^\w.-]+", "-", text, flags=re.UNICODE).strip("-")
+    return text or "call"
+
+
+def default_debug_log_path(platform_id: str, task_id: str) -> str:
+    timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"{slugify_filename(platform_id)}-{timestamp}-{slugify_filename(task_id)[:12]}.jsonl"
+    return os.path.abspath(os.path.join(DEFAULT_DEBUG_LOG_DIR, filename))
+
+
+def resolve_debug_log_path(path: str | None, platform_id: str, task_id: str) -> str:
+    absolute_path = os.path.abspath(path) if path else default_debug_log_path(platform_id, task_id)
+    project_log_dir = os.path.abspath(DEFAULT_DEBUG_LOG_DIR)
+    try:
+        inside_project_logs = os.path.commonpath([project_log_dir, absolute_path]) == project_log_dir
+    except ValueError:
+        inside_project_logs = False
+    if inside_project_logs:
+        return absolute_path
+    return os.path.join(project_log_dir, os.path.basename(absolute_path))
+
+
+def sanitize_debug_value(value: Any, key_hint: str = "", depth: int = 0) -> Any:
+    if SENSITIVE_KEY_RE.search(key_hint):
+        return "[redacted]"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value
+    if depth >= 8:
+        return "[max-depth]"
+    if isinstance(value, list):
+        return [sanitize_debug_value(item, key_hint, depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): sanitize_debug_value(nested, str(key), depth + 1)
+            for key, nested in value.items()
+        }
+    return str(value)
+
+
+def append_debug_log_event(path: str, event: str, data: dict[str, Any]) -> tuple[str, int]:
+    absolute_path = resolve_debug_log_path(path, "debug", "manual")
+    os.makedirs(os.path.dirname(absolute_path), exist_ok=True)
+    entry = sanitize_debug_value({
+        "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "event": event,
+        **data,
+    })
+    text = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+    with open(absolute_path, "a", encoding="utf-8") as file:
+        file.write(text)
+        file.write("\n")
+    return absolute_path, os.path.getsize(absolute_path)
+
+
+def raw_event_count(debug_data: Any, key: str) -> int:
+    if not isinstance(debug_data, dict):
+        return 0
+    value = debug_data.get(key)
+    return len(value) if isinstance(value, list) else 0
 
 
 def print_platforms() -> None:
@@ -335,15 +887,28 @@ def main() -> int:
         raise SystemExit("Missing query. Use --query or positional query.")
 
     platform_id, platform_config = resolve_platform(str(platform))
-    model = args.model or str(platform_config["model"])
+    model = resolve_model(platform_id, str(platform_config["model"]), args)
+    main_task_id = args.main_task_id or task.get("mainTaskId") or str(uuid.uuid4())
+    debug_log_file = resolve_debug_log_path(args.debug_log_file, platform_id, main_task_id) if args.debug_raw else ""
     proxy_nodes = fetch_proxy_nodes(args.base_url, args.management_secret, args.timeout)
     proxy_city, city_status = resolve_proxy_city(city, proxy_nodes)
-    payload = build_payload(str(query), model, proxy_city, args)
-    response = post_json(chat_endpoint(args.base_url), payload, args.api_key, args.timeout)
-    answer = extract_answer(response)
+    payload = build_payload(str(query), model, proxy_city, args, debug_log_file)
+    if args.debug_raw:
+        append_debug_log_event(debug_log_file, "script.request", {
+            "mainTaskId": main_task_id,
+            "platform": platform_config["label"],
+            "platformId": platform_id,
+            "query": str(query),
+            "request": {
+                "url": chat_endpoint(args.base_url),
+                "payload": payload,
+            },
+        })
+    response = post_chat_completion(chat_endpoint(args.base_url), payload, args.api_key, args.timeout, args.debug_raw)
+    structured = extract_structured_fields(response)
 
     result: dict[str, Any] = {
-        "mainTaskId": args.main_task_id or task.get("mainTaskId") or str(uuid.uuid4()),
+        "mainTaskId": main_task_id,
         "platform": platform_config["label"],
         "platformId": platform_id,
         "enterpriseId": args.enterprise_id or task.get("enterpriseId") or "",
@@ -353,10 +918,36 @@ def main() -> int:
         "proxyCity": proxy_city,
         "cityStatus": city_status,
         "model": model,
-        "answer": answer,
+        **structured,
         "finishReason": extract_finish_reason(response),
         "usage": response.get("usage"),
     }
+    if args.debug_raw:
+        proxy_debug = response.get("__chat2api_debug")
+        provider_debug = response.get("chat2api_debug")
+        log_path, log_bytes = append_debug_log_event(debug_log_file, "script.result", {
+            "mainTaskId": main_task_id,
+            "platform": platform_config["label"],
+            "platformId": platform_id,
+            "createTime": result["createTime"],
+            "query": str(query),
+            "response": {
+                "structured": result,
+                "raw": response,
+            },
+            "rawResponses": {
+                "proxy": proxy_debug,
+                "provider": provider_debug,
+            },
+        })
+        result["debug"] = {
+            "logPath": log_path,
+            "logBytes": log_bytes,
+            "rawResponseCounts": {
+                "proxySseEvents": raw_event_count(proxy_debug, "raw_sse_events"),
+                "providerUpstreamEvents": raw_event_count(provider_debug, "raw_upstream_events"),
+            },
+        }
     if args.raw:
         result["raw"] = response
 
