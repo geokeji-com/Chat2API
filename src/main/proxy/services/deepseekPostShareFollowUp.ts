@@ -74,7 +74,7 @@ export function createDeepSeekPostShareFollowUpPlan(options: {
   const prompts = (Array.isArray(config.prompts) ? config.prompts : [])
     .filter((prompt): prompt is string => typeof prompt === 'string' && prompt.trim().length > 0)
 
-  if (prompts.length !== 2) {
+  if (prompts.length < 1) {
     return undefined
   }
 
