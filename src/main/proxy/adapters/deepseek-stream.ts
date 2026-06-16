@@ -14,6 +14,9 @@ const MODEL_NAME = 'deepseek-chat'
 const SEARCH_CONTROL_MARKER_PATTERN = /^(SEARCH|WEB_SEARCH|SEARCHING)(?:\s+|$)/i
 const INLINE_CITATION_MARKER_PATTERN = /\[citation:(\d+)\]/g
 const STRIP_INLINE_CITATION_MARKER_PATTERN = /\s*\[citation:\d+\]/g
+// [reference:N] is DeepSeek's newer inline citation format (cite_index is null on search results)
+const INLINE_REFERENCE_MARKER_PATTERN = /\[reference:(\d+)\]/g
+const STRIP_INLINE_REFERENCE_MARKER_PATTERN = /\s*\[reference:\d+\]/g
 
 function stripSearchControlMarker(content: string, enabled: boolean): string {
   return enabled ? content.replace(SEARCH_CONTROL_MARKER_PATTERN, '') : content
@@ -21,9 +24,10 @@ function stripSearchControlMarker(content: string, enabled: boolean): string {
 
 function formatInlineCitationMarkers(content: string, enabled: boolean, preserveMarkers: boolean): string {
   if (!enabled) return content
-  return preserveMarkers
-    ? content
-    : content.replace(STRIP_INLINE_CITATION_MARKER_PATTERN, '')
+  if (preserveMarkers) return content
+  return content
+    .replace(STRIP_INLINE_CITATION_MARKER_PATTERN, '')
+    .replace(STRIP_INLINE_REFERENCE_MARKER_PATTERN, '')
 }
 
 interface StreamChunk {
@@ -229,8 +233,15 @@ export class DeepSeekStreamHandler {
   }
 
   private static createCitationList(results: any[]): DeepSeekCitation[] {
+    // If all cite_index are null, fall back to array position (newer DeepSeek protocol)
+    const hasCiteIndex = results.some(r => Number.isFinite(r.cite_index))
+    // Fallback: 1-based position index when all cite_index are null (thinking mode)
+    const resolved = hasCiteIndex
+      ? results
+      : results.map((r, i) => ({ ...r, cite_index: i + 1 }))
+
     const seenUrls = new Set<string>()
-    return results
+    return resolved
       .filter(r => Number.isFinite(r.cite_index) && typeof r.url === 'string' && typeof r.title === 'string')
       .filter(r => {
         if (seenUrls.has(r.url)) return false
@@ -587,6 +598,36 @@ export class DeepSeekStreamHandler {
         DeepSeekStreamHandler.mergeSearchResultsInto(this.searchResults, chunk.v)
       } else {
         DeepSeekStreamHandler.applySearchResultBatch(this.searchResults, chunk.v)
+      }
+      return
+    }
+
+    // Handle BATCH operations on a fragment path that may APPEND content (e.g. [reference:N] markers)
+    // Pattern: {"p":"response/fragments/-1","o":"BATCH","v":[{"p":"content","o":"APPEND","v":"[reference:0]"},...]}
+    // Also handles top-level BATCH with no p field: {"o":"BATCH","v":[{"p":"content","o":"APPEND","v":"..."},...]}
+    if (
+      chunk.o === 'BATCH' && Array.isArray(chunk.v) &&
+      (
+        !chunk.p ||
+        /^response\/fragments\/-?\d+$/.test(chunk.p)
+      )
+    ) {
+      let batchContent = ''
+      for (const op of chunk.v) {
+        if (
+          op && typeof op === 'object' &&
+          op.p === 'content' && op.o === 'APPEND' &&
+          typeof op.v === 'string'
+        ) {
+          // Strip [reference:N] markers — thinking mode cite_index is null so indices can't
+          // be reliably mapped to citations. Non-thinking mode uses [citation:N] in the content
+          // stream directly with valid cite_index values, so no stripping needed there.
+          const stripped = op.v.replace(/\s*\[reference:\d+\]/g, '')
+          batchContent += stripped
+        }
+      }
+      if (batchContent) {
+        this.sendContent(batchContent, this.currentPath || 'content', transStream, isSilentModel, isFoldModel, isSearchSilentModel)
       }
       return
     }

@@ -28,10 +28,11 @@ export const deepseekConfig: BuiltinProviderConfig = {
   },
   enabled: true,
   description: 'DeepSeek AI assistant, supports deep thinking and web search',
-  supportedModels: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+  supportedModels: ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-expert'],
   modelMappings: {
     'deepseek-v4-flash': 'deepseek-v4-flash',
     'deepseek-v4-pro': 'deepseek-v4-pro',
+    'deepseek-expert': 'deepseek-expert',
   },
   credentialFields: [
     {
