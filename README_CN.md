@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  Chat2API 通过驱动各大模型的官方 Web UI，实现 0 成本接入主流 AI 大模型。支持 DeepSeek、GLM、Kimi、MiniMax、Qwen、Z.ai 等渠道，可无缝连接 openlcaw、Cline、Roo-Code 等工具，让任何 OpenAI 兼容客户端即刻可用。
+  Chat2API 通过驱动各大模型的官方 Web UI，实现 0 成本接入主流 AI 大模型。支持 DeepSeek、豆包、元宝、Kimi、Qwen 等渠道，可无缝连接 openlcaw、Cline、Roo-Code 等工具，让任何 OpenAI 兼容客户端即刻可用。
 </p>
 
 ![Product Preview](docs/screenshots/preview.png)
@@ -31,7 +31,7 @@
 ## ✨ 功能特性
 
 - OpenAI 兼容 API：提供标准 OpenAI 兼容接口，无缝对接现有工具
-- 多服务商支持：支持 DeepSeek、GLM、Kimi、MiniMax、Perplexity 🆕、Qwen、Z.ai 等
+- 多服务商支持：支持 DeepSeek、豆包、元宝、Kimi、Qwen 等
 - 🆕 上下文管理：智能对话上下文管理，支持滑动窗口、Token 限制和总结压缩策略
 - 🆕 工具调用支持：通过提示词工程为所有模型提供通用工具调用能力，兼容 Cherry Studio、Kilo Code 等客户端
 - 🆕 模型映射：灵活的模型名称映射，支持通配符和首选服务商/账户选择
@@ -47,17 +47,13 @@
 
 ## 🤖 支持的服务商
 
-| 服务商           | 认证类型          | OAuth | 模型                                                                                                                                                                                                                                            |
-| ------------- | ------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| DeepSeek      | User Token    | 是     | deepseek-v4-flash, deepseek-v4-pro                                                                                                                                                                                                            |
-| GLM           | Refresh Token | 是     | GLM-5.1                                                                                                                                                                                                                                       |
-| Kimi          | JWT Token     | 是     | Kimi-K2.6                                                                                                                                                                                                                                     |
-| MiniMax       | JWT Token     | 是     | MiniMax-M2.7                                                                                                                                                                                                                                  |
-| Mimo          | Cookie        | 是     | MiMo-V2.5-Pro, MiMo-V2.5, MiMo-V2-Flash                                                                                                                                                                                                       |
-| Perplexity    | Cookie        | 是     | Auto                                                                                                                                                                                                                                         |
-| Qwen (国内版)    | SSO Ticket    | 是     | Qwen3.7-千问, Qwen3.7-Max, Qwen3.5-Flash, Qwen3-Max, Qwen3-Max-Thinking-Preview, Qwen3-Coder                                                                                                                                                  |
-| Qwen AI (国际版) | JWT Token     | 是     | Qwen3.7-Max, Qwen3.6-Plus, Qwen3.6-35B-A3B, Qwen3.6-27B, Qwen3-Coder                                                                                                                                                                         |
-| Z.ai          | JWT Token     | 是     | 受前端验证码风控限制，暂不可用                                                                                                                                                                                                                              |
+| 服务商    | 认证类型       | OAuth | 模型                                                                                                         |
+| --------- | -------------- | ----- | ------------------------------------------------------------------------------------------------------------ |
+| DeepSeek  | User Token     | 是    | deepseek-v4-flash, deepseek-v4-pro                                                                           |
+| 豆包      | Cookie         | 是    | doubao-pro, doubao-lite                                                                                      |
+| 元宝      | Cookie         | 是    | hunyuan, hunyuan-t1                                                                                          |
+| Kimi      | JWT Token      | 是    | Kimi-K2.6                                                                                                    |
+| Qwen (国内版) | SSO Ticket | 是    | Qwen3.7-千问, Qwen3.7-Max, Qwen3.5-Flash, Qwen3-Max, Qwen3-Max-Thinking-Preview, Qwen3-Coder               |
 
 供应商适配说明和手动添加模型教程见 [docs/providers](docs/providers/README.md)。
 

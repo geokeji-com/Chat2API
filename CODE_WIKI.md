@@ -2,11 +2,11 @@
 
 ## 1. 项目概述
 
-Chat2API 是一个多平台 AI 服务统一管理工具，通过利用官方 Web UI 实现零成本访问领先的 AI 模型。它支持 DeepSeek、GLM、Kimi、MiniMax、Qwen、Z.ai 等提供商，并与 openlcaw、Cline、Roo-Code 等工具无缝集成，使任何 OpenAI 兼容客户端都能开箱即用。
+Chat2API 是一个多平台 AI 服务统一管理工具，通过利用官方 Web UI 实现零成本访问领先的 AI 模型。它支持 DeepSeek、豆包、元宝、Kimi、Qwen 等提供商，并与 openlcaw、Cline、Roo-Code 等工具无缝集成，使任何 OpenAI 兼容客户端都能开箱即用。
 
 ### 核心功能
 - OpenAI 兼容 API：提供标准的 OpenAI 兼容 API 端点，实现无缝集成
-- 多提供商支持：连接 DeepSeek、GLM、Kimi、MiniMax、Perplexity、Qwen、Z.ai 等
+- 多提供商支持：连接 DeepSeek、豆包、元宝、Kimi、Qwen 等
 - 上下文管理：智能对话上下文管理，支持滑动窗口、令牌限制和摘要策略
 - 函数调用支持：通过提示工程实现所有模型的通用工具调用能力，兼容 Cherry Studio、Kilo Code 等客户端
 - 模型映射：灵活的模型名称映射，支持通配符和首选提供商/账户选择
@@ -246,13 +246,11 @@ npm run start:sandbox
 
 支持的提供商：
 - DeepSeek
-- GLM
+- 豆包（Doubao）
+- 元宝（Yuanbao）
 - Kimi
-- MiniMax
-- Perplexity
-- Qwen (CN)
-- Qwen AI (Global)
-- Z.ai
+- Qwen（国内版）
+- Qwen（国内版）
 
 每个提供商需要配置相应的认证信息，如令牌或凭证。
 
