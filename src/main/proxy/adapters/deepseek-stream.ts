@@ -8,6 +8,7 @@ import { parseToolCallsFromText } from '../utils/toolParser.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 import type { DeepSeekMessageId, DeepSeekShareInfo } from './deepseek.ts'
+import { appendDebugTraceEvent } from '../debugTrace.ts'
 
 const MODEL_NAME = 'deepseek-chat'
 const SEARCH_CONTROL_MARKER_PATTERN = /^(SEARCH|WEB_SEARCH|SEARCHING)(?:\s+|$)/i
@@ -86,6 +87,9 @@ export class DeepSeekStreamHandler {
     messageId: DeepSeekMessageId | undefined,
     messageIds: DeepSeekMessageId[] | undefined,
   ) => Promise<DeepSeekShareInfo | undefined>
+  private debugRaw: boolean
+  private debugLogFile?: string
+  private rawUpstreamEvents: string[] = []
 
   constructor(
     model: string,
@@ -98,7 +102,9 @@ export class DeepSeekStreamHandler {
     shareInfoProvider?: (
       messageId: DeepSeekMessageId | undefined,
       messageIds: DeepSeekMessageId[] | undefined,
-    ) => Promise<DeepSeekShareInfo | undefined>
+    ) => Promise<DeepSeekShareInfo | undefined>,
+    debugRaw: boolean = false,
+    debugLogFile?: string,
   ) {
     this.model = model
     this.semanticModel = (semanticModel || model).toLowerCase()
@@ -110,6 +116,8 @@ export class DeepSeekStreamHandler {
     this.webSearchEnabled = webSearchEnabled
     this.reasoningEffort = reasoningEffort
     this.shareInfoProvider = shareInfoProvider
+    this.debugRaw = debugRaw
+    this.debugLogFile = debugLogFile
   }
 
   getLastMessageId(): DeepSeekMessageId | undefined {
@@ -286,6 +294,69 @@ export class DeepSeekStreamHandler {
     }
   }
 
+  private static collectFragmentSearchResults(fragment: any, searchResults: any[]): void {
+    if (!fragment || typeof fragment !== 'object') {
+      return
+    }
+
+    for (const key of ['results', 'references', 'search_results', 'searchResults', 'sources']) {
+      if (Array.isArray(fragment[key])) {
+        DeepSeekStreamHandler.mergeSearchResultsInto(searchResults, fragment[key])
+      }
+    }
+  }
+
+  private static collectBatchOperationMetadata(
+    chunk: StreamChunk,
+    searchResults: any[],
+    searchQueries: string[],
+    relatedSearches: string[],
+  ): void {
+    if (chunk.o !== 'BATCH' || !Array.isArray(chunk.v)) {
+      return
+    }
+
+    for (const operation of chunk.v) {
+      if (!operation || typeof operation !== 'object') {
+        continue
+      }
+
+      const path = typeof operation.p === 'string' ? operation.p : ''
+      const value = operation.v
+
+      DeepSeekStreamHandler.collectChunkMetadata(
+        { p: path, v: value, o: operation.o },
+        searchQueries,
+        relatedSearches,
+      )
+
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        DeepSeekStreamHandler.collectFragmentMetadata(value, searchQueries, relatedSearches)
+        DeepSeekStreamHandler.collectFragmentSearchResults(value, searchResults)
+      }
+
+      if (!Array.isArray(value)) {
+        continue
+      }
+
+      if (path === 'fragments' || /(?:^|\/)fragments$/.test(path)) {
+        for (const fragment of value) {
+          DeepSeekStreamHandler.collectFragmentMetadata(fragment, searchQueries, relatedSearches)
+          DeepSeekStreamHandler.collectFragmentSearchResults(fragment, searchResults)
+        }
+        continue
+      }
+
+      if (/search_results|searchResults|(?:^|\/)results$/i.test(path)) {
+        if (operation.o === 'BATCH') {
+          DeepSeekStreamHandler.applySearchResultBatch(searchResults, value)
+        } else {
+          DeepSeekStreamHandler.mergeSearchResultsInto(searchResults, value)
+        }
+      }
+    }
+  }
+
   private static collectChunkMetadata(
     chunk: StreamChunk,
     searchQueries: string[],
@@ -356,6 +427,12 @@ export class DeepSeekStreamHandler {
       chunk.related_searches = relatedSearches
     }
 
+    if (finishReason && this.debugRaw) {
+      chunk.chat2api_debug = {
+        raw_upstream_events: this.rawUpstreamEvents,
+      }
+    }
+
     return `data: ${JSON.stringify(chunk)}\n\n`
   }
 
@@ -380,6 +457,10 @@ export class DeepSeekStreamHandler {
         if (data === '[DONE]') {
           void this.handleDone(transStream, isFoldModel, isSearchSilentModel)
           return
+        }
+
+        if (this.debugRaw) {
+          this.rawUpstreamEvents.push(data)
         }
 
         const parsed = this.parseSSE(data)
@@ -419,6 +500,12 @@ export class DeepSeekStreamHandler {
     const previousPath = this.currentPath
 
     DeepSeekStreamHandler.collectChunkMetadata(chunk, this.searchQueries, this.relatedSearches)
+    DeepSeekStreamHandler.collectBatchOperationMetadata(
+      chunk,
+      this.searchResults,
+      this.searchQueries,
+      this.relatedSearches,
+    )
 
     if (chunk.v && typeof chunk.v === 'object' && chunk.v.response) {
       const isThinkingNow = chunk.v.response.thinking_enabled
@@ -434,10 +521,12 @@ export class DeepSeekStreamHandler {
       if (Array.isArray(fragments) && fragments.length > 0) {
         for (const fragment of fragments) {
           DeepSeekStreamHandler.collectFragmentMetadata(fragment, this.searchQueries, this.relatedSearches)
+          DeepSeekStreamHandler.collectFragmentSearchResults(fragment, this.searchResults)
 
           if (Array.isArray(fragment.results)) {
             DeepSeekStreamHandler.mergeSearchResultsInto(this.searchResults, fragment.results)
           }
+          DeepSeekStreamHandler.collectFragmentSearchResults(fragment, this.searchResults)
 
           if (fragment.content) {
             const fragmentType = fragment.type
@@ -455,6 +544,7 @@ export class DeepSeekStreamHandler {
       if (Array.isArray(chunk.v)) {
         for (const fragment of chunk.v) {
           DeepSeekStreamHandler.collectFragmentMetadata(fragment, this.searchQueries, this.relatedSearches)
+          DeepSeekStreamHandler.collectFragmentSearchResults(fragment, this.searchResults)
 
           if (fragment.content) {
             const fragmentType = fragment.type
@@ -630,12 +720,29 @@ export class DeepSeekStreamHandler {
     // Determine finish_reason based on whether we had tool calls
     const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
 
+    this.appendRawUpstreamTrace('stream', finishReason)
     transStream.write(this.createChunk({}, finishReason, citations, this.searchQueries, this.relatedSearches))
+    void this.onEnd?.(this.shareInfo, finishReason)
     transStream.write('data: [DONE]\n\n')
     transStream.end()
-    
-    // Call end callback
-    void this.onEnd?.(this.shareInfo, finishReason)
+  }
+
+  private appendRawUpstreamTrace(mode: 'stream' | 'non_stream', finishReason: string): void {
+    if (!this.debugRaw) {
+      return
+    }
+
+    appendDebugTraceEvent(this.debugLogFile, 'deepseek.upstream_sse', {
+      provider: 'deepseek',
+      mode,
+      model: this.model,
+      sessionId: this.sessionId,
+      requestMessageId: this.requestMessageId,
+      responseMessageId: this.messageId,
+      finishReason,
+      rawEvents: this.rawUpstreamEvents,
+      rawEventCount: this.rawUpstreamEvents.length,
+    })
   }
 
   async handleNonStream(stream: NodeJS.ReadableStream): Promise<any> {
@@ -672,6 +779,10 @@ export class DeepSeekStreamHandler {
           if (data === '[DONE]') return
 
           try {
+            if (this.debugRaw) {
+              this.rawUpstreamEvents.push(data)
+            }
+
             const parsed = JSON.parse(data)
             
             if (parsed.request_message_id !== undefined && this.requestMessageId === undefined) {
@@ -684,6 +795,12 @@ export class DeepSeekStreamHandler {
             }
 
             DeepSeekStreamHandler.collectChunkMetadata(parsed, searchQueries, relatedSearches)
+            DeepSeekStreamHandler.collectBatchOperationMetadata(
+              parsed,
+              searchResults,
+              searchQueries,
+              relatedSearches,
+            )
 
             if (parsed.v && typeof parsed.v === 'object' && parsed.v.response) {
               const isThinkingNow = parsed.v.response.thinking_enabled
@@ -702,10 +819,12 @@ export class DeepSeekStreamHandler {
               if (Array.isArray(fragments) && fragments.length > 0) {
                 for (const fragment of fragments) {
                   DeepSeekStreamHandler.collectFragmentMetadata(fragment, searchQueries, relatedSearches)
+                  DeepSeekStreamHandler.collectFragmentSearchResults(fragment, searchResults)
 
                   if (Array.isArray(fragment.results)) {
                     DeepSeekStreamHandler.mergeSearchResultsInto(searchResults, fragment.results)
                   }
+                  DeepSeekStreamHandler.collectFragmentSearchResults(fragment, searchResults)
 
                   if (fragment.content) {
                     let cleanedFragment = fragment.content.replace(/FINISHED/g, '')
@@ -727,6 +846,7 @@ export class DeepSeekStreamHandler {
               if (Array.isArray(parsed.v)) {
                 for (const fragment of parsed.v) {
                   DeepSeekStreamHandler.collectFragmentMetadata(fragment, searchQueries, relatedSearches)
+                  DeepSeekStreamHandler.collectFragmentSearchResults(fragment, searchResults)
 
                   if (fragment.content) {
                     let cleanedFragment = fragment.content.replace(/FINISHED/g, '')
@@ -860,7 +980,7 @@ export class DeepSeekStreamHandler {
 
         await this.attachShareInfo()
 
-        resolve({
+        const result: any = {
           id: `${this.sessionId}@${messageId ?? ''}`,
           model: this.model,
           object: 'chat.completion',
@@ -872,7 +992,16 @@ export class DeepSeekStreamHandler {
           usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: accumulatedTokenUsage },
           created: this.created,
           chat2api: this.shareInfo,
-        })
+        }
+
+        if (this.debugRaw) {
+          result.chat2api_debug = {
+            raw_upstream_events: this.rawUpstreamEvents,
+          }
+        }
+
+        this.appendRawUpstreamTrace('non_stream', toolCalls.length > 0 ? 'tool_calls' : 'stop')
+        resolve(result)
       })
 
       stream.on('error', reject)

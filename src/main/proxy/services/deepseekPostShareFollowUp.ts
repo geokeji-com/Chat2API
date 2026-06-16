@@ -67,7 +67,7 @@ export function createDeepSeekPostShareFollowUpPlan(options: {
     return undefined
   }
 
-  if (!shareInfo?.share_url || !hasMessageId(shareInfo.message_id)) {
+  if (!shareInfo?.session_id || !hasMessageId(shareInfo.message_id)) {
     return undefined
   }
 

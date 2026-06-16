@@ -249,6 +249,9 @@ export class RequestForwarder {
               undefined,
               undefined,
               model,
+              undefined,
+              options.adapter.getDebugRawEnabled(),
+              options.adapter.getDebugLogFile(),
             )
             await handler.handleNonStream(response.data)
             const responseMessageId = handler.getLastMessageId()
@@ -468,6 +471,18 @@ export class RequestForwarder {
           currentProxyNode = switchResult.proxyNode
           if (switchResult.switched) {
             lastError = switchResult.error
+            if (switchResult.fallbackToDirect && attempt >= maxRetries) {
+              const directResult = await this.doForward(modifiedRequest, currentAccount, provider, actualModel, {
+                ...context,
+                accountId: currentAccount.id,
+              })
+              if (directResult.success) {
+                return directResult
+              }
+              lastError = directResult.error
+              lastFailureType = directResult.failureType
+              break
+            }
             continue
           }
           break
@@ -484,6 +499,18 @@ export class RequestForwarder {
           currentAccount = switchResult.account
           currentProxyNode = switchResult.proxyNode
           if (switchResult.switched) {
+            if (switchResult.fallbackToDirect && attempt >= maxRetries) {
+              const directResult = await this.doForward(modifiedRequest, currentAccount, provider, actualModel, {
+                ...context,
+                accountId: currentAccount.id,
+              })
+              if (directResult.success) {
+                return directResult
+              }
+              lastError = directResult.error
+              lastFailureType = directResult.failureType
+              break
+            }
             continue
           }
           break
@@ -619,7 +646,10 @@ export class RequestForwarder {
         tools: transformed.tools,
       }
 
-      const adapter = new DeepSeekAdapter(provider, account, outboundProxy)
+      const adapter = new DeepSeekAdapter(provider, account, outboundProxy, {
+        raw: request.chat2api_debug_raw === true,
+        logFile: request.chat2api_debug_log_file,
+      })
       
       const { response, sessionId } = await adapter.chatCompletion({
         model: request.model,
@@ -628,6 +658,8 @@ export class RequestForwarder {
         temperature: transformedRequest.temperature,
         web_search: transformedRequest.web_search,
         reasoning_effort: transformedRequest.reasoning_effort,
+        chat2api_debug_raw: request.chat2api_debug_raw,
+        chat2api_debug_log_file: request.chat2api_debug_log_file,
       })
 
       const latency = Date.now() - startTime
@@ -670,7 +702,9 @@ export class RequestForwarder {
         transformedRequest.reasoning_effort,
         transformed.plan,
         request.model,
-        (messageId, messageIds) => adapter.createShareLink(sessionId, messageId, messageIds)
+        (messageId, messageIds) => adapter.createShareLink(sessionId, messageId, messageIds),
+        request.chat2api_debug_raw === true,
+        request.chat2api_debug_log_file,
       )
       
       if (request.stream) {

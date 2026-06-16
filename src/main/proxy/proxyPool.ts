@@ -25,6 +25,7 @@ export interface ProxyFailureResult {
   account: Account
   proxyNode?: ProxyNode
   switched: boolean
+  fallbackToDirect?: boolean
   error?: string
 }
 
@@ -290,10 +291,12 @@ export class ProxyPoolManager {
 
     const proxyNode = this.selectAvailableNode(provider.id, account.id)
       if (!proxyNode) {
-        return {
-          account,
-          error: 'no_available_proxy',
-        }
+        const updated = storeManager.updateAccount(account.id, { proxyBinding: undefined })
+        storeManager.addLog('warn', `No available proxy for account ${account.name}; falling back to direct connection`, {
+          accountId: account.id,
+          providerId: provider.id,
+        })
+        return { account: updated || { ...account, proxyBinding: undefined } }
       }
 
     const updated = this.bindAccount(account, proxyNode, false)
@@ -372,8 +375,20 @@ export class ProxyPoolManager {
 
     const nextProxyNode = this.selectAvailableNode(provider.id, account.id, proxyNode?.id)
     if (!nextProxyNode) {
-      storeManager.updateAccount(account.id, { proxyBinding: undefined })
-      return { account: { ...account, proxyBinding: undefined }, proxyNode: undefined, switched: false, error: message }
+      const updated = storeManager.updateAccount(account.id, { proxyBinding: undefined })
+      storeManager.addLog('warn', `Proxy pool exhausted for account ${account.name}; falling back to direct connection`, {
+        accountId: account.id,
+        providerId: provider.id,
+        proxyId: proxyNode?.id,
+        data: { error: message },
+      })
+      return {
+        account: updated || { ...account, proxyBinding: undefined },
+        proxyNode: undefined,
+        switched: true,
+        fallbackToDirect: true,
+        error: message,
+      }
     }
 
     const updated = this.bindAccount(account, nextProxyNode, true)

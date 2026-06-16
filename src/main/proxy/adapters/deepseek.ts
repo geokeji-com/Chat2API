@@ -17,6 +17,7 @@ import {
 } from './providerModelOptions'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles'
 import { applyAxiosProxyConfig, type OutboundProxyContext } from '../proxyTransport'
+import { appendDebugTraceEvent, sanitizeDebugTraceValue } from '../debugTrace'
 
 const DEEPSEEK_API_BASE = 'https://chat.deepseek.com/api'
 
@@ -71,6 +72,8 @@ interface ChatCompletionRequest {
   reasoning_effort?: 'low' | 'medium' | 'high'
   tools?: any[]
   tool_choice?: any
+  chat2api_debug_raw?: boolean
+  chat2api_debug_log_file?: string
 }
 
 export type DeepSeekMessageId = string | number
@@ -174,14 +177,95 @@ export class DeepSeekAdapter {
   private account: Account
   private token: string
   private outboundProxy?: OutboundProxyContext
+  private debugRaw: boolean
+  private debugLogFile?: string
 
-  constructor(provider: Provider, account: Account, outboundProxy?: OutboundProxyContext) {
+  constructor(
+    provider: Provider,
+    account: Account,
+    outboundProxy?: OutboundProxyContext,
+    debugOptions?: { raw?: boolean; logFile?: string },
+  ) {
     this.provider = provider
     this.account = account
     this.outboundProxy = outboundProxy
+    this.debugRaw = debugOptions?.raw === true
+    this.debugLogFile = debugOptions?.logFile
     console.log('[DeepSeek] Account credentials:', JSON.stringify(account.credentials, null, 2))
     this.token = account.credentials.token || account.credentials.apiKey || account.credentials.refreshToken || ''
     console.log('[DeepSeek] Using token:', this.token.substring(0, 20) + '...')
+  }
+
+  setDebugOptions(options: { raw?: boolean; logFile?: string }): void {
+    this.debugRaw = options.raw === true
+    this.debugLogFile = options.logFile
+  }
+
+  getDebugRawEnabled(): boolean {
+    return this.debugRaw
+  }
+
+  getDebugLogFile(): string | undefined {
+    return this.debugLogFile
+  }
+
+  private trace(event: string, data: Record<string, any>): void {
+    if (!this.debugRaw) {
+      return
+    }
+
+    appendDebugTraceEvent(this.debugLogFile, event, {
+      provider: 'deepseek',
+      providerId: this.provider.id,
+      accountId: this.account.id,
+      proxy: this.outboundProxy
+        ? {
+            id: this.outboundProxy.node.id,
+            name: this.outboundProxy.node.name,
+            host: this.outboundProxy.node.host,
+            port: this.outboundProxy.node.port,
+          }
+        : null,
+      ...data,
+    })
+  }
+
+  private async tracedAxios<T = any>(event: string, config: any): Promise<AxiosResponse<T>> {
+    const startedAt = Date.now()
+    this.trace(`${event}.request`, {
+      method: config.method || 'GET',
+      url: config.url,
+      headers: config.headers,
+      data: config.data,
+      responseType: config.responseType,
+      timeout: config.timeout,
+    })
+
+    try {
+      const response = await axios.request<T>(config)
+      this.trace(`${event}.response`, {
+        method: config.method || 'GET',
+        url: config.url,
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+        data: sanitizeDebugTraceValue(response.data),
+        latencyMs: Date.now() - startedAt,
+      })
+      return response
+    } catch (error: any) {
+      this.trace(`${event}.error`, {
+        method: config.method || 'GET',
+        url: config.url,
+        message: error?.message || String(error),
+        code: error?.code,
+        status: error?.response?.status,
+        responseHeaders: error?.response?.headers,
+        responseData: sanitizeDebugTraceValue(error?.response?.data),
+        latencyMs: Date.now() - startedAt,
+      })
+      throw error
+    }
   }
 
   private async acquireToken(): Promise<string> {
@@ -196,7 +280,9 @@ export class DeepSeekAdapter {
 
     console.log('[DeepSeek] Acquiring token...')
     
-    const result = await axios.get(`${DEEPSEEK_API_BASE}/v0/users/current`, applyAxiosProxyConfig({
+    const result = await this.tracedAxios('deepseek.users.current', applyAxiosProxyConfig({
+      method: 'GET',
+      url: `${DEEPSEEK_API_BASE}/v0/users/current`,
       headers: {
         Authorization: `Bearer ${this.token}`,
         ...FAKE_HEADERS,
@@ -236,10 +322,10 @@ export class DeepSeekAdapter {
 
   private async createSession(): Promise<string> {
     const token = await this.acquireToken()
-    const result = await axios.post(
-      `${DEEPSEEK_API_BASE}/v0/chat_session/create`,
-      {},
-      applyAxiosProxyConfig({
+    const result = await this.tracedAxios('deepseek.chat_session.create', applyAxiosProxyConfig({
+        method: 'POST',
+        url: `${DEEPSEEK_API_BASE}/v0/chat_session/create`,
+        data: {},
         headers: {
           Authorization: `Bearer ${token}`,
           ...FAKE_HEADERS,
@@ -268,9 +354,9 @@ export class DeepSeekAdapter {
 
   async fetchSessionMessageIds(sessionId: string, token?: string): Promise<DeepSeekMessageId[]> {
     const effectiveToken = token || await this.acquireToken()
-    const result = await axios.get(
-      `${DEEPSEEK_API_BASE}/v0/chat/history_messages?chat_session_id=${encodeURIComponent(sessionId)}`,
-      {
+    const result = await this.tracedAxios('deepseek.chat.history_messages', {
+        method: 'GET',
+        url: `${DEEPSEEK_API_BASE}/v0/chat/history_messages?chat_session_id=${encodeURIComponent(sessionId)}`,
         headers: {
           Authorization: `Bearer ${effectiveToken}`,
           ...FAKE_HEADERS,
@@ -331,23 +417,22 @@ export class DeepSeekAdapter {
         }
       }
 
-      const result = await axios.post(
-        `${DEEPSEEK_API_BASE}/v0/share/create`,
-        {
+      const result = await this.tracedAxios('deepseek.share.create', {
+        method: 'POST',
+        url: `${DEEPSEEK_API_BASE}/v0/share/create`,
+        data: {
           chat_session_id: sessionId,
           message_ids: messageIds,
         },
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            ...FAKE_HEADERS,
-            Referer: conversationUrl,
-            Cookie: generateCookie(),
-          },
-          timeout: 15000,
-          validateStatus: () => true,
-        }
-      )
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...FAKE_HEADERS,
+          Referer: conversationUrl,
+          Cookie: generateCookie(),
+        },
+        timeout: 15000,
+        validateStatus: () => true,
+      })
 
       console.log('[DeepSeek] Create share response:', JSON.stringify(result.data, null, 2))
 
@@ -387,10 +472,10 @@ export class DeepSeekAdapter {
   async deleteSession(sessionId: string): Promise<boolean> {
     try {
       const token = await this.acquireToken()
-      const result = await axios.post(
-        `${DEEPSEEK_API_BASE}/v0/chat_session/delete`,
-        { chat_session_id: sessionId },
-        {
+      const result = await this.tracedAxios('deepseek.chat_session.delete', {
+          method: 'POST',
+          url: `${DEEPSEEK_API_BASE}/v0/chat_session/delete`,
+          data: { chat_session_id: sessionId },
           headers: {
             Authorization: `Bearer ${token}`,
             ...FAKE_HEADERS,
@@ -415,10 +500,10 @@ export class DeepSeekAdapter {
 
   private async getChallenge(targetPath: string): Promise<ChallengeResponse> {
     const token = await this.acquireToken()
-    const result = await axios.post(
-      `${DEEPSEEK_API_BASE}/v0/chat/create_pow_challenge`,
-      { target_path: targetPath },
-      {
+    const result = await this.tracedAxios('deepseek.chat.create_pow_challenge', {
+        method: 'POST',
+        url: `${DEEPSEEK_API_BASE}/v0/chat/create_pow_challenge`,
+        data: { target_path: targetPath },
         headers: {
           Authorization: `Bearer ${token}`,
           ...FAKE_HEADERS,
@@ -564,10 +649,10 @@ export class DeepSeekAdapter {
     const challengeAnswer = await this.calculateChallengeAnswer(challenge)
     const payload = buildDeepSeekCompletionPayload(options)
 
-    return axios.post(
-      `${DEEPSEEK_API_BASE}/v0/chat/completion`,
-      payload,
-      applyAxiosProxyConfig({
+    return this.tracedAxios('deepseek.chat.completion', applyAxiosProxyConfig({
+        method: 'POST',
+        url: `${DEEPSEEK_API_BASE}/v0/chat/completion`,
+        data: payload,
         headers: {
           Authorization: `Bearer ${options.token}`,
           ...FAKE_HEADERS,
@@ -583,6 +668,13 @@ export class DeepSeekAdapter {
   }
 
   async chatCompletion(request: ChatCompletionRequest): Promise<{ response: AxiosResponse; sessionId: string }> {
+    if (request.chat2api_debug_raw !== undefined || request.chat2api_debug_log_file !== undefined) {
+      this.setDebugOptions({
+        raw: request.chat2api_debug_raw === true,
+        logFile: request.chat2api_debug_log_file,
+      })
+    }
+
     const token = await this.acquireToken()
     
     const sessionId = await this.createSession()
@@ -639,10 +731,10 @@ export class DeepSeekAdapter {
   async deleteAllChats(): Promise<boolean> {
     try {
       const token = await this.acquireToken()
-      const result = await axios.post(
-        `${DEEPSEEK_API_BASE}/v0/chat_session/delete_all`,
-        {},
-        {
+      const result = await this.tracedAxios('deepseek.chat_session.delete_all', {
+          method: 'POST',
+          url: `${DEEPSEEK_API_BASE}/v0/chat_session/delete_all`,
+          data: {},
           headers: {
             Authorization: `Bearer ${token}`,
             ...FAKE_HEADERS,

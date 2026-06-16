@@ -102,6 +102,10 @@ export interface ChatCompletionRequest {
   deep_research?: boolean
   /** Internal Chat2API proxy-pool city constraint. Ignored when no matching node exists. */
   proxy_city?: string
+  /** Internal Chat2API debug option. Includes raw upstream response data in the final response when supported. */
+  chat2api_debug_raw?: boolean
+  /** Internal Chat2API debug trace log path. Raw interface events are appended here when debug is enabled. */
+  chat2api_debug_log_file?: string
   /** Tools for function calling */
   tools?: ChatCompletionTool[]
   /** Tool choice strategy */
