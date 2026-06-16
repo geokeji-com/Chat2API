@@ -98,6 +98,17 @@ interface QwenChat2ApiInfo {
   search_results?: QwenSearchSummary
   search_queries?: string[]
   related_searches?: string[]
+  videos?: QwenVideoItem[]
+}
+
+interface QwenVideoItem {
+  id?: string
+  title: string
+  url: string
+  cover?: string
+  author?: string
+  subtype?: string
+  duration?: string
 }
 
 type QwenShareInfoProvider = (
@@ -1096,6 +1107,7 @@ export class QwenStreamHandler {
   private searchResults: QwenCitation[] = []
   private sourceResults: QwenCitation[] = []
   private relatedSearches: string[] = []
+  private videos: QwenVideoItem[] = []
   private sourceGroupRefs: Map<string, number[]> = new Map()
   private shareId: string = ''
   private shareUrl: string = ''
@@ -1222,6 +1234,24 @@ export class QwenStreamHandler {
       if (question && !this.relatedSearches.includes(question)) {
         this.relatedSearches = [...this.relatedSearches, question]
       }
+    }
+  }
+
+  private addVideoItems(list: any[]): void {
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue
+      const url = item.url || item.norm_url
+      if (!url) continue
+      if (this.videos.some(v => v.url === url)) continue
+      this.videos.push({
+        ...(item.zhidaye_id ? { id: item.zhidaye_id } : {}),
+        title: item.title || '',
+        url,
+        ...(item.cover ? { cover: item.cover } : {}),
+        ...(item.author ? { author: item.author } : {}),
+        ...(item.subtype ? { subtype: item.subtype } : {}),
+        ...(item.duration ? { duration: item.duration } : {}),
+      })
     }
   }
 
@@ -1420,6 +1450,7 @@ export class QwenStreamHandler {
       ...(searchSummary ? { search_results: searchSummary } : {}),
       ...(this.searchKeywords.length > 0 ? { search_queries: [...this.searchKeywords] } : {}),
       ...(this.relatedSearches.length > 0 ? { related_searches: [...this.relatedSearches] } : {}),
+      ...(this.videos.length > 0 ? { videos: [...this.videos] } : {}),
     }
 
     if (this.shareError) {
@@ -1440,6 +1471,9 @@ export class QwenStreamHandler {
     }
     if (this.relatedSearches.length > 0) {
       target.related_searches = [...this.relatedSearches]
+    }
+    if (this.videos.length > 0) {
+      target.videos = [...this.videos]
     }
   }
 
@@ -1665,8 +1699,24 @@ export class QwenStreamHandler {
 
               // Second pass: process answer content and completion status
               for (const { msg } of eventMessages) {
-                
-                // Filter out [(deep_think)] and [(multimodal_chat_think_*)] markers from content
+
+                // Extract related searches from paa/iframe messages
+                if (msg.mime_type === 'paa/iframe' && msg.meta_data?.paas) {
+                  for (const paa of msg.meta_data.paas) {
+                    if (paa.show_text) {
+                      this.addRelatedSearches([paa.show_text])
+                    }
+                  }
+                }
+
+                // Extract video items from multi_load entries of type video_note_list
+                if (msg.mime_type === 'multi_load/iframe' && msg.meta_data?.multi_load) {
+                  for (const load of msg.meta_data.multi_load) {
+                    if (load.type === 'video_note_list' && Array.isArray(load.content?.list)) {
+                      this.addVideoItems(load.content.list)
+                    }
+                  }
+                }
                 if ((msg.mime_type === 'text/plain' || msg.mime_type === 'multi_load/iframe') && msg.content) {
                   const newContent = this.normalizeAnswerContent(String(msg.content))
                   
@@ -1843,6 +1893,7 @@ export class QwenStreamHandler {
             citations?: QwenCitation[]
             search_queries?: string[]
             related_searches?: string[]
+            videos?: QwenVideoItem[]
           }
           finish_reason: string
         }>
@@ -1935,6 +1986,24 @@ export class QwenStreamHandler {
                   // Strategy: prefer deep_think, fall back to multimodal_chat_think only if no deep_think
                   const metaData = msg.meta_data || {}
                   const multiLoad = metaData.multi_load || []
+
+                  // Extract related searches from paa/iframe messages
+                  if (msg.mime_type === 'paa/iframe' && metaData.paas) {
+                    for (const paa of metaData.paas) {
+                      if (paa.show_text) {
+                        this.addRelatedSearches([paa.show_text])
+                      }
+                    }
+                  }
+
+                  // Extract video items from multi_load entries of type video_note_list
+                  if (msg.mime_type === 'multi_load/iframe') {
+                    for (const load of multiLoad) {
+                      if (load.type === 'video_note_list' && Array.isArray(load.content?.list)) {
+                        this.addVideoItems(load.content.list)
+                      }
+                    }
+                  }
                   let hasDeepThink = false
                   for (const load of multiLoad) {
                     if (load.type === 'deep_think' && load.content) {
