@@ -18,13 +18,8 @@ import { Check, Plus, ArrowRight, Loader2, ExternalLink, AlertCircle, CheckCircl
 import type { BuiltinProviderConfig, ProviderVendor } from '@/types/electron'
 import { cn } from '@/lib/utils'
 import deepseekIcon from '@/assets/providers/deepseek.svg'
-import glmIcon from '@/assets/providers/glm.svg'
 import kimiIcon from '@/assets/providers/kimi.svg'
-import mimoIcon from '@/assets/providers/mimo.svg'
-import minimaxIcon from '@/assets/providers/minimax.svg'
-import perplexityIcon from '@/assets/providers/perplexity.svg'
 import qwenIcon from '@/assets/providers/qwen.svg'
-import zaiIcon from '@/assets/providers/zai.svg'
 import doubaoIcon from '@/assets/providers/doubao.png'
 import yuanbaoIcon from '@/assets/providers/yuanbao.png'
 
@@ -50,14 +45,8 @@ const providerIcons: Record<string, string> = {
   deepseek: deepseekIcon,
   doubao: doubaoIcon,
   yuanbao: yuanbaoIcon,
-  glm: glmIcon,
   kimi: kimiIcon,
-  mimo: mimoIcon,
-  minimax: minimaxIcon,
-  perplexity: perplexityIcon,
   qwen: qwenIcon,
-  'qwen-ai': qwenIcon,
-  zai: zaiIcon,
 }
 
 function mapOAuthCredentials(providerId: string | undefined, credentials: Record<string, string>): Record<string, string> {
@@ -69,21 +58,13 @@ function mapOAuthCredentials(providerId: string | undefined, credentials: Record
   }
 
   const credentialKeyMap: Record<string, string> = {
-    'glm': 'chatglm_refresh_token',
     'deepseek': 'userToken',
     'qwen': 'tongyi_sso_ticket',
-    'qwen-ai': 'tongyi_sso_ticket',
-    'zai': 'tongyi_sso_ticket',
-    'perplexity': '__Secure-next-auth.session-token',
   }
 
   const providerFieldNames: Record<string, string> = {
-    'glm': 'refresh_token',
     'deepseek': 'token',
     'qwen': 'ticket',
-    'qwen-ai': 'ticket',
-    'zai': 'ticket',
-    'perplexity': 'sessionToken',
   }
 
   const oauthKey = credentialKeyMap[providerId]
@@ -104,47 +85,6 @@ function mapOAuthCredentials(providerId: string | undefined, credentials: Record
       console.log('[mapOAuthCredentials] Mapped', oauthKey, 'to', fieldName)
       return { [fieldName]: tokenValue }
     }
-  }
-
-  if (providerId === 'perplexity' && credentials['__Secure-next-auth.session-token']) {
-    console.log('[mapOAuthCredentials] Mapped Perplexity secure token')
-    return { sessionToken: credentials['__Secure-next-auth.session-token'] }
-  }
-  if (providerId === 'perplexity' && credentials['next-auth.session-token']) {
-    console.log('[mapOAuthCredentials] Mapped Perplexity session token')
-    return { sessionToken: credentials['next-auth.session-token'] }
-  }
-
-  if (providerId === 'mimo') {
-    console.log('[mapOAuthCredentials] Processing Mimo credentials')
-    const result: Record<string, string> = {}
-    
-    if (credentials['serviceToken']) {
-      result['service_token'] = credentials['serviceToken']
-      console.log('[mapOAuthCredentials] Mapped serviceToken -> service_token')
-    } else if (credentials['service_token']) {
-      result['service_token'] = credentials['service_token']
-      console.log('[mapOAuthCredentials] Using existing service_token')
-    }
-    
-    if (credentials['userId']) {
-      result['user_id'] = credentials['userId']
-      console.log('[mapOAuthCredentials] Mapped userId -> user_id')
-    } else if (credentials['user_id']) {
-      result['user_id'] = credentials['user_id']
-      console.log('[mapOAuthCredentials] Using existing user_id')
-    }
-    
-    if (credentials['xiaomichatbot_ph']) {
-      result['ph_token'] = credentials['xiaomichatbot_ph']
-      console.log('[mapOAuthCredentials] Mapped xiaomichatbot_ph -> ph_token')
-    } else if (credentials['ph_token']) {
-      result['ph_token'] = credentials['ph_token']
-      console.log('[mapOAuthCredentials] Using existing ph_token')
-    }
-    
-    console.log('[mapOAuthCredentials] Mimo result:', JSON.stringify(result, null, 2))
-    return result
   }
 
   console.log('[mapOAuthCredentials] No special mapping needed, returning as-is')

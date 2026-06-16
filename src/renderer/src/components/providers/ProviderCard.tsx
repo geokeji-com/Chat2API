@@ -26,28 +26,17 @@ import {
 import { cn } from '@/lib/utils'
 import type { Provider, ProviderStatus } from '@/types/electron'
 import deepseekIcon from '@/assets/providers/deepseek.svg'
-import glmIcon from '@/assets/providers/glm.svg'
 import kimiIcon from '@/assets/providers/kimi.svg'
-import minimaxIcon from '@/assets/providers/minimax.svg'
-import perplexityIcon from '@/assets/providers/perplexity.svg'
 import qwenIcon from '@/assets/providers/qwen.svg'
-import zaiIcon from '@/assets/providers/zai.svg'
-import mimoIcon from '@/assets/providers/mimo.svg'
 import doubaoIcon from '@/assets/providers/doubao.png'
 import yuanbaoIcon from '@/assets/providers/yuanbao.png'
 
 const providerIcons: Record<string, string> = {
   deepseek: deepseekIcon,
   doubao: doubaoIcon,
-  glm: glmIcon,
   kimi: kimiIcon,
   yuanbao: yuanbaoIcon,
-  minimax: minimaxIcon,
-  mimo: mimoIcon,
-  perplexity: perplexityIcon,
   qwen: qwenIcon,
-  'qwen-ai': qwenIcon,
-  zai: zaiIcon,
 }
 
 interface ProviderCardProps {

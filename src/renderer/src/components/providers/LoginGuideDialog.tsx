@@ -14,11 +14,8 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { ExternalLink, Loader2, Check, Copy, AlertCircle } from 'lucide-react'
 import type { BuiltinProviderConfig } from '@/types/electron'
 import deepseekIcon from '@/assets/providers/deepseek.svg'
-import glmIcon from '@/assets/providers/glm.svg'
 import kimiIcon from '@/assets/providers/kimi.svg'
-import minimaxIcon from '@/assets/providers/minimax.svg'
 import qwenIcon from '@/assets/providers/qwen.svg'
-import zaiIcon from '@/assets/providers/zai.svg'
 import doubaoIcon from '@/assets/providers/doubao.png'
 import yuanbaoIcon from '@/assets/providers/yuanbao.png'
 
@@ -26,12 +23,8 @@ const providerIcons: Record<string, string> = {
   deepseek: deepseekIcon,
   doubao: doubaoIcon,
   yuanbao: yuanbaoIcon,
-  glm: glmIcon,
   kimi: kimiIcon,
-  minimax: minimaxIcon,
   qwen: qwenIcon,
-  'qwen-ai': qwenIcon,
-  zai: zaiIcon,
 }
 
 interface LoginGuideDialogProps {
@@ -81,32 +74,6 @@ export function LoginGuideDialog({
         t('loginGuide.paste'),
       ],
     },
-    'qwen-ai': {
-      loginUrl: 'https://chat.qwen.ai',
-      steps: [
-        t('loginGuide.openWebsite', { provider: t('qwen-ai.name') }),
-        t('oauth.step1'),
-        t('oauth.step2'),
-        t('oauth.step3'),
-        '1. In Local Storage → chat.qwen.ai',
-        '   Find "token" field (JWT format, starts with "eyJ...")',
-        '2. In Cookies → chat.qwen.ai (Optional but recommended)',
-        '   Copy all cookies or key cookies: cnaui, aui, sca, cna',
-        t('loginGuide.paste'),
-      ],
-    },
-    glm: {
-      loginUrl: 'https://chatglm.cn',
-      steps: [
-        t('loginGuide.openWebsite', { provider: t('glm.name') }),
-        t('oauth.step1'),
-        t('oauth.step2'),
-        t('oauth.step3'),
-        'In Cookies → chatglm.cn',
-        'Find chatglm_refresh_token field',
-        t('loginGuide.paste'),
-      ],
-    },
     kimi: {
       loginUrl: 'https://www.kimi.com',
       steps: [
@@ -116,30 +83,6 @@ export function LoginGuideDialog({
         'Open DevTools → Application → Cookies',
         'Find kimi-auth cookie',
         'Copy the JWT token value',
-        t('loginGuide.paste'),
-      ],
-    },
-    minimax: {
-      loginUrl: 'https://agent.minimaxi.com',
-      steps: [
-        t('loginGuide.openWebsite', { provider: t('minimax.name') }),
-        t('oauth.step1'),
-        t('oauth.step2'),
-        t('oauth.step3'),
-        'In Local Storage → agent.minimaxi.com',
-        'Find user_id and token fields',
-        t('loginGuide.paste'),
-      ],
-    },
-    zai: {
-      loginUrl: 'https://chat.z.ai',
-      steps: [
-        t('loginGuide.openWebsite', { provider: t('zai.name') }),
-        t('oauth.step1'),
-        t('oauth.step2'),
-        t('oauth.step3'),
-        'In Cookies → chat.z.ai',
-        'Find token field (starts with "eyJ...")',
         t('loginGuide.paste'),
       ],
     },
