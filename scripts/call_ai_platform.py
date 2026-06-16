@@ -121,6 +121,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--create-time", help="Optional create time for output envelope.")
     parser.add_argument("--city", default=os.getenv("CHAT2API_CITY"), help="Optional proxy-pool target city, e.g. 上海.")
     parser.add_argument("--web-search", action="store_true", help="Set request web_search=true.")
+    parser.add_argument("--thinking", action="store_true", help="Enable thinking/reasoning mode. Yuanbao: T1 model.")
     parser.add_argument("--expert", action="store_true", help="DeepSeek only: use expert model (R1, no web search).")
     parser.add_argument("--raw", action="store_true", help="Include raw OpenAI-compatible response.")
     parser.add_argument(
@@ -265,6 +266,15 @@ def resolve_model(platform_id: str, default_model: str, args: argparse.Namespace
             return f"{requested_model}-search"
 
     elif platform_id == "kimi":
+        if args.web_search:
+            return f"{requested_model}-search"
+
+    elif platform_id == "yuanbao":
+        thinking = getattr(args, "thinking", False)
+        if thinking and args.web_search:
+            return f"{requested_model}-t1-search"
+        if thinking:
+            return f"{requested_model}-t1"
         if args.web_search:
             return f"{requested_model}-search"
 
@@ -704,10 +714,10 @@ def normalize_citations(value: Any) -> list[dict[str, Any]]:
             "citeIndex": cite_index,
             "url": pick_text(item, ["url", "href", "link"]),
             "title": pick_text(item, ["title", "name"]),
-            "snippet": pick_text(item, ["snippet", "summary", "content", "text", "description", "abstract", "passage", "quote"]),
-            "platform": pick_text(item, ["site_name", "siteName", "platform", "source", "source_name", "website", "host", "domain"]),
-            "publishedAt": first_defined(item.get("published_at"), item.get("publishedAt"), item.get("publish_time"), item.get("date")),
-            "siteIcon": pick_text(item, ["site_icon", "siteIcon", "iconUrl", "icon_url", "icon", "favicon"]),
+            "snippet": pick_text(item, ["quote", "snippet", "abstract", "passage", "summary", "content", "text", "description"]),
+            "platform": pick_text(item, ["web_site_name", "webSiteSource", "webName", "web_name", "site_name", "siteName", "platform", "source", "source_name", "website", "host", "domain"]),
+            "publishedAt": first_defined(item.get("publishTime"), item.get("publish_time"), item.get("published_at"), item.get("publishedAt"), item.get("date")),
+            "siteIcon": pick_text(item, ["icon_url", "site_icon", "siteIcon", "iconUrl", "icon_url", "icon", "favicon"]),
         })
     return normalized
 
