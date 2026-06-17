@@ -13,8 +13,8 @@ import type { OutboundProxyContext } from '../proxyTransport'
 const DOUBAO_WEB_BASE = 'https://www.doubao.com'
 const DOUBAO_CHAT_URL = `${DOUBAO_WEB_BASE}/chat/`
 const DOUBAO_COMPLETION_URL = `${DOUBAO_WEB_BASE}/chat/completion`
-const DOUBAO_SHARE_INFO_URL = `${DOUBAO_WEB_BASE}/samantha/thread/share/info`
-const DOUBAO_SHARE_SAVE_URL = `${DOUBAO_WEB_BASE}/samantha/thread/share/save`
+const DOUBAO_SHARE_TOKEN_URL = `${DOUBAO_WEB_BASE}/im/message/share/share_token`
+const DOUBAO_SHARE_SAVE_URL = `${DOUBAO_WEB_BASE}/im/message/share/save`
 const DOUBAO_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 const DEFAULT_DOUBAO_BOT_ID = '7338286299411103781'
@@ -89,6 +89,9 @@ const JS_STREAM_DOUBAO = `
 async (args) => {
   const findFp = () => {
     if (args.fp) return args.fp;
+    // prefer s_v_web_id cookie (wangchu-style)
+    const fpCookie = document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('s_v_web_id='));
+    if (fpCookie) return fpCookie.split('=')[1] || '';
     const values = [location.href, document.cookie];
     try {
       for (let i = 0; i < localStorage.length; i++) {
@@ -106,12 +109,50 @@ async (args) => {
     return match ? match[0] : '';
   };
 
+  const extractDeviceParams = () => {
+    let deviceId = '', webId = '';
+    try {
+      const samWeb = JSON.parse(localStorage.getItem('samantha_web_web_id') || '{}');
+      deviceId = samWeb.web_id || '';
+    } catch (_) {}
+    try {
+      const tea = JSON.parse(localStorage.getItem('__tea_cache_tokens_497858') || '{}');
+      webId = tea.web_id || '';
+    } catch (_) {}
+    return { deviceId: deviceId || webId, webId: webId || deviceId };
+  };
+
+  const buildUrl = (baseUrl, fp, deviceId, webId) => {
+    const params = {
+      aid: '497858',
+      device_id: deviceId,
+      device_platform: 'web',
+      fp: fp,
+      language: 'zh',
+      pc_version: '3.19.4',
+      pkg_type: 'release_version',
+      real_aid: '497858',
+      samantha_web: '1',
+      tea_uuid: webId,
+      'use-olympus-account': '1',
+      version_code: '20800',
+      web_id: webId,
+    };
+    const qs = Object.entries(params)
+      .filter(([, v]) => v)
+      .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
+      .join('&');
+    return qs ? baseUrl + '?' + qs : baseUrl;
+  };
+
   const fetchStr = window.fetch.toString().substring(0, 120);
   const hooked = !/native code/i.test(fetchStr);
   const payload = args.payload || {};
   payload.ext = payload.ext || {};
   const fp = findFp();
   if (fp) payload.ext.fp = fp;
+  const { deviceId, webId } = extractDeviceParams();
+  const url = buildUrl(args.url, fp, deviceId, webId);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), args.timeoutMs || 180000);
@@ -123,7 +164,7 @@ async (args) => {
   };
 
   try {
-    const res = await fetch(args.url, {
+    const res = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
@@ -705,6 +746,10 @@ export class DoubaoAdapter {
   private async injectCookies(browserSession: Session, cookies: Record<string, string>): Promise<void> {
     for (const [name, value] of Object.entries(cookies)) {
       if (!value) continue
+      // Remove first to avoid "overwrite HttpOnly cookie" error from persistent session
+      try {
+        await browserSession.cookies.remove(DOUBAO_WEB_BASE, name)
+      } catch (_) {}
       await browserSession.cookies.set({
         url: DOUBAO_WEB_BASE,
         name,
@@ -769,7 +814,7 @@ export class DoubaoAdapter {
     try {
       const args = {
         baseUrl: DOUBAO_WEB_BASE,
-        infoUrl: DOUBAO_SHARE_INFO_URL,
+        infoUrl: DOUBAO_SHARE_TOKEN_URL,
         saveUrl: DOUBAO_SHARE_SAVE_URL,
         conversationId,
       }
