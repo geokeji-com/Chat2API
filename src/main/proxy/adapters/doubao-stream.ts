@@ -6,11 +6,10 @@
 import { PassThrough } from 'stream'
 import type { DoubaoResponseMetadata } from './doubao'
 
-type DoubaoTextSource = 'chunk_delta' | 'stream_chunk'
-
 const REASONING_KEY_PATTERN = /(think|reason|deep|cot|chain)/i
-const SOURCE_CONTAINER_KEY_PATTERN = /(citation|source|reference|search|web|result|text_tags?|网页|引用|来源|信源)/i
-const RELATED_SEARCH_KEY_PATTERN = /(related[_-]?search|related[_-]?question|suggest|sp_v2|follow[_-]?up)/i
+const SOURCE_CONTAINER_KEY_PATTERN = /(citation|source|reference|search|web|result|text_tags?|网页|引用|来源|信源|doc|card|site|page)/i
+const RELATED_SEARCH_KEY_PATTERN = /(related[_-]?search|related[_-]?question|related|suggest|suggested|suggestted|suggestion|sp_v2|follow[_-]?up|recommend|candidate|question[_-]?list|wcb_item|send[_-]?content)/i
+const SEARCH_KEYWORD_KEY_PATTERN = /(keyword|keywords|query|queries|search[_-]?(?:query|queries|word|words|keyword|keywords)|query[_-]?list|search[_-]?infos?)/i
 const IMAGE_OR_STATIC_URL_PATTERN = /\.(?:png|jpe?g|gif|webp|heic|svg)(?:[?#]|$)|byteimg\.com|imagex-sign/i
 
 interface ParsedSSEEvent {
@@ -42,11 +41,11 @@ export class DoubaoStreamHandler {
   private onEnd?: () => void
   private content: string = ''
   private reasoning: string = ''
-  private textSource: DoubaoTextSource | null = null
-  private reasoningTextSource: DoubaoTextSource | null = null
   private sessionMeta: DoubaoSessionMeta = {}
   private suggestions: any[] = []
   private citations: DoubaoCitation[] = []
+  private citationKeys = new Set<string>()
+  private userMessageIds = new Set<string>()
   private searchKeywords: string[] = []
   private brief: string = ''
   private imageUrls: string[] = []
@@ -243,8 +242,13 @@ export class DoubaoStreamHandler {
     this.collectMetadata(event.data)
 
     switch (event.event) {
+      case 'CHAT2API_METADATA':
+        this.applyInitialMetadata(event.data)
+        return
       case 'SSE_HEARTBEAT':
+        return
       case 'FULL_MSG_NOTIFY':
+        this.processFullMsg(event.data, transStream)
         return
       case 'SSE_ACK':
         this.processAck(event.data)
@@ -260,9 +264,6 @@ export class DoubaoStreamHandler {
         return
       case 'SSE_REPLY_END':
         this.processReplyEnd(event.data)
-        if (transStream) {
-          this.finishStream(transStream)
-        }
         return
       case 'STREAM_ERROR': {
         const errorMessage = formatDoubaoStreamError(event.data)
@@ -290,6 +291,10 @@ export class DoubaoStreamHandler {
     if (typeof query?.message_index === 'number') {
       this.sessionMeta.lastMessageIndex = query.message_index
     }
+    for (const item of Array.isArray(data?.query_list) ? data.query_list : []) {
+      if (item?.question_id) this.userMessageIds.add(String(item.question_id))
+      if (item?.local_message_id) this.userMessageIds.add(String(item.local_message_id))
+    }
   }
 
   private processStreamMsg(data: any, transStream?: PassThrough): void {
@@ -312,16 +317,44 @@ export class DoubaoStreamHandler {
       if (!text) continue
 
       if (this.isReasoningBlock(block)) {
-        this.appendReasoningText(text, undefined, transStream)
+        this.appendReasoningText(text, transStream)
         continue
       }
 
       if (block?.block_type === 10000) {
-        this.content += text
-        if (transStream) {
-          transStream.write(this.createChunk({ content: text }))
-        }
-        break
+        this.appendText(text, transStream)
+      }
+    }
+  }
+
+  private processFullMsg(data: any, transStream?: PassThrough): void {
+    const message = data?.message || data
+    if (!message || typeof message !== 'object') return
+
+    if (this.isKnownUserMessage(message) || this.isLikelyUserMessage(message)) return
+
+    const meta = message.meta || data?.meta || {}
+    if (message.message_id) {
+      this.sessionMeta.messageId = message.message_id
+    }
+    if (message.section_id || meta.section_id) {
+      this.sessionMeta.sectionId = message.section_id || meta.section_id
+    }
+    if (typeof message.index_in_conv === 'number' || typeof meta.index_in_conv === 'number') {
+      this.sessionMeta.lastMessageIndex = message.index_in_conv ?? meta.index_in_conv
+    }
+
+    const blocks = message?.content?.content_block || message?.content_block || data?.content?.content_block
+    if (!Array.isArray(blocks)) return
+
+    for (const block of blocks) {
+      const text = this.extractBlockText(block)
+      if (!text) continue
+
+      if (this.isReasoningBlock(block)) {
+        this.appendReasoningText(text, transStream)
+      } else if (block?.block_type === 10000 || this.isAssistantTextBlock(block)) {
+        this.appendText(text, transStream)
       }
     }
   }
@@ -329,7 +362,7 @@ export class DoubaoStreamHandler {
   private processChunkDelta(data: any, transStream?: PassThrough): void {
     const directReasoning = this.extractDirectReasoningText(data)
     if (directReasoning) {
-      this.appendReasoningText(directReasoning, 'chunk_delta', transStream)
+      this.appendReasoningText(directReasoning, transStream)
     }
 
     const text = typeof data?.text === 'string' ? data.text : ''
@@ -340,9 +373,9 @@ export class DoubaoStreamHandler {
     }
 
     if (this.hasReasoningMarker(data)) {
-      this.appendReasoningText(text, 'chunk_delta', transStream)
+      this.appendReasoningText(text, transStream)
     } else {
-      this.appendText(text, 'chunk_delta', transStream)
+      this.appendText(text, transStream)
     }
   }
 
@@ -368,9 +401,9 @@ export class DoubaoStreamHandler {
           if (!text) continue
 
           if (this.isReasoningBlock(block)) {
-            this.appendReasoningText(text, 'stream_chunk', transStream)
+            this.appendReasoningText(text, transStream)
           } else if (blockType === 10000) {
-            this.appendText(text, 'stream_chunk', transStream)
+            this.appendText(text, transStream)
           }
         }
       } else if (patchObject === 3) {
@@ -387,23 +420,23 @@ export class DoubaoStreamHandler {
             const parsed = JSON.parse(content)
             const text = parsed?.text || ''
             if (this.isReasoningPayload(patchValue) || this.isReasoningPayload(parsed)) {
-              this.appendReasoningText(text, 'stream_chunk', transStream)
+              this.appendReasoningText(text, transStream)
             } else {
-              this.appendText(text, 'stream_chunk', transStream)
+              this.appendText(text, transStream)
             }
           } catch {
             if (this.isReasoningPayload(patchValue)) {
-              this.appendReasoningText(content, 'stream_chunk', transStream)
+              this.appendReasoningText(content, transStream)
             } else {
-              this.appendText(content, 'stream_chunk', transStream)
+              this.appendText(content, transStream)
             }
           }
         } else if (content && typeof content === 'object') {
           const text = content.text || ''
           if (this.isReasoningPayload(patchValue) || this.isReasoningPayload(content)) {
-            this.appendReasoningText(text, 'stream_chunk', transStream)
+            this.appendReasoningText(text, transStream)
           } else {
-            this.appendText(text, 'stream_chunk', transStream)
+            this.appendText(text, transStream)
           }
         }
       }
@@ -417,36 +450,40 @@ export class DoubaoStreamHandler {
     }
   }
 
-  private appendText(text: string, source: DoubaoTextSource, transStream?: PassThrough): void {
-    if (!text) return
+  private appendText(text: string, transStream?: PassThrough): void {
+    const delta = this.createAppendDelta(this.content, text)
+    if (!delta) return
 
-    if (this.textSource === null) {
-      this.textSource = source
-    } else if (this.textSource !== source) {
-      return
-    }
-
-    this.content += text
+    this.content += delta
     if (transStream) {
-      transStream.write(this.createChunk({ content: text }))
+      transStream.write(this.createChunk({ content: delta }))
     }
   }
 
-  private appendReasoningText(text: string, source?: DoubaoTextSource, transStream?: PassThrough): void {
-    if (!text) return
+  private appendReasoningText(text: string, transStream?: PassThrough): void {
+    const delta = this.createAppendDelta(this.reasoning, text)
+    if (!delta) return
 
-    if (source) {
-      if (this.reasoningTextSource === null) {
-        this.reasoningTextSource = source
-      } else if (this.reasoningTextSource !== source) {
-        return
+    this.reasoning += delta
+    if (transStream) {
+      transStream.write(this.createChunk({ reasoning_content: delta }))
+    }
+  }
+
+  private createAppendDelta(existing: string, incoming: string): string {
+    if (!incoming) return ''
+    if (!existing) return incoming
+    if (incoming.startsWith(existing)) return incoming.slice(existing.length)
+    if (existing.endsWith(incoming)) return ''
+
+    const maxOverlap = Math.min(existing.length, incoming.length, 4000)
+    for (let size = maxOverlap; size > 0; size--) {
+      if (existing.endsWith(incoming.slice(0, size))) {
+        return incoming.slice(size)
       }
     }
 
-    this.reasoning += text
-    if (transStream) {
-      transStream.write(this.createChunk({ reasoning_content: text }))
-    }
+    return incoming
   }
 
   private extractDirectReasoningText(data: any): string {
@@ -470,10 +507,42 @@ export class DoubaoStreamHandler {
 
   private isReasoningBlock(block: any): boolean {
     if (!block || typeof block !== 'object') return false
-    if (block.block_type === 10000 || block.block_type === 10101 || block.block_type === 2074) {
+    if (block.block_type === 10000 || block.block_type === 2074) {
       return this.isReasoningPayload(block)
     }
-    return this.extractBlockText(block) !== ''
+    if (block.block_type === 10101) {
+      return true
+    }
+    return this.isReasoningPayload(block)
+  }
+
+  private isLikelyUserMessage(message: any): boolean {
+    const role = this.pickString(message.role, message.sender_role, message.message_role, message.sender?.role)
+    if (/user|human/i.test(role)) return true
+    if (/assistant|bot|answer/i.test(role)) return false
+
+    const messageType = this.pickString(message.message_type, message.type, message.sender_type)
+    if (/user|human/i.test(messageType)) return true
+    if (/assistant|bot|answer/i.test(messageType)) return false
+
+    return false
+  }
+
+  private isKnownUserMessage(message: any): boolean {
+    const ids = [
+      message.message_id,
+      message.local_message_id,
+      message.id,
+      message.meta?.message_id,
+      message.meta?.local_message_id,
+    ]
+    return ids.some(id => id && this.userMessageIds.has(String(id)))
+  }
+
+  private isAssistantTextBlock(block: any): boolean {
+    if (!block || typeof block !== 'object') return false
+    const blockType = this.pickString(block.type, block.name, block.block_name)
+    return /answer|assistant|text/i.test(blockType)
   }
 
   private isReasoningPayload(value: any): boolean {
@@ -584,8 +653,57 @@ export class DoubaoStreamHandler {
   }
 
   private collectMetadata(value: any): void {
+    this.collectDoubaoSearchBlocks(value)
     this.collectRelatedSearches(value)
     this.collectSources(value)
+    this.collectSearchKeywords(value)
+  }
+
+  private collectDoubaoSearchBlocks(value: any, depth: number = 0): void {
+    if (!value || depth > 10) return
+
+    if (typeof value === 'string') {
+      const parsed = this.tryParseJSON(value)
+      if (parsed) {
+        this.collectDoubaoSearchBlocks(parsed, depth + 1)
+      }
+      return
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        this.collectDoubaoSearchBlocks(item, depth + 1)
+      }
+      return
+    }
+
+    if (typeof value !== 'object') return
+
+    const searchBlock = value.search_query_result_block || value.searchQueryResultBlock
+    if (searchBlock && typeof searchBlock === 'object') {
+      this.collectSearchQueryResultBlock(searchBlock)
+    }
+
+    for (const child of Object.values(value)) {
+      this.collectDoubaoSearchBlocks(child, depth + 1)
+    }
+  }
+
+  private collectSearchQueryResultBlock(block: any): void {
+    const queries = block?.queries || block?.query_list || block?.queryList
+    if (Array.isArray(queries)) {
+      for (const query of queries) {
+        this.addSearchKeyword(this.pickString(query?.query, query?.keyword, query?.text, query))
+      }
+    }
+
+    const results = block?.results || block?.result_list || block?.resultList
+    if (!Array.isArray(results)) return
+
+    for (const result of results) {
+      const card = result?.text_card || result?.textCard || result?.card || result
+      this.addCitationFromObject(card)
+    }
   }
 
   private collectRelatedSearches(value: any, keyHint: string = '', depth: number = 0): void {
@@ -632,9 +750,16 @@ export class DoubaoStreamHandler {
         || value.query
         || value.question
         || value.title
+        || value.send_content
+        || value.sendContent
         || value.display_text
         || value.displayText
         || value.send_message_text
+        || value.sendMessageText
+        || value?.text_conf?.send_message_text
+        || value?.text_conf?.display_text
+        || value?.textConf?.sendMessageText
+        || value?.textConf?.displayText
         || value
     }
 
@@ -697,10 +822,13 @@ export class DoubaoStreamHandler {
       value.web_url,
       value.webUrl,
       value.page_url,
-      value.pageUrl
+      value.pageUrl,
+      value.display_url,
+      value.displayUrl,
+      value.source?.url,
+      value.page?.url,
+      value.doc?.url
     )
-    if (!url || IMAGE_OR_STATIC_URL_PATTERN.test(url)) return
-    if (this.citations.some(item => item.url === url)) return
 
     const title = this.pickString(
       value.title,
@@ -711,24 +839,94 @@ export class DoubaoStreamHandler {
       value.sourceName,
       value.display_title,
       value.displayTitle,
-      value.text
+      value.text,
+      value.source?.title,
+      value.page?.title,
+      value.doc?.title
     ) || url
-    const snippet = this.pickString(value.snippet, value.summary, value.description, value.content, value.abstract)
-    const siteName = this.pickString(value.site_name, value.siteName, value.source_name, value.sourceName, value.domain)
+
+    const fallbackUrl = url || this.createCitationFallbackUrl(value, title)
+    if (!fallbackUrl || IMAGE_OR_STATIC_URL_PATTERN.test(fallbackUrl)) return
+
+    const snippet = this.pickString(value.snippet, value.summary, value.description, value.content, value.abstract, value.quote, value.fragment)
+    const siteName = this.pickString(value.site_name, value.siteName, value.sitename, value.source_name, value.sourceName, value.domain, value.website, value.host)
+    const explicitIndex = this.pickNumber(value.index, value.cite_index, value.citeIndex, value.ref_num, value.ref, value.source_index, value.sourceIndex, value.original_doc_rank)
+    const citationKey = [
+      explicitIndex ?? '',
+      fallbackUrl,
+      title,
+      snippet,
+    ].join('\u0000')
+    if (this.citationKeys.has(citationKey)) return
+    this.citationKeys.add(citationKey)
 
     this.citations.push({
-      index: this.citations.length + 1,
+      index: explicitIndex ?? this.citations.length + 1,
       title,
-      url,
+      url: fallbackUrl,
       ...(snippet ? { snippet } : {}),
       ...(siteName ? { site_name: siteName } : {}),
     })
   }
 
+  private createCitationFallbackUrl(value: any, title: string): string {
+    const displayUrl = this.pickString(value?.url, value?.display_url, value?.displayUrl)
+    if (displayUrl && !IMAGE_OR_STATIC_URL_PATTERN.test(displayUrl)) {
+      return displayUrl
+    }
+
+    const docId = this.pickString(value?.doc_id, value?.docId, value?.id)
+    if (docId && title) {
+      return `doubao-search:${encodeURIComponent(docId)}`
+    }
+
+    return ''
+  }
+
   private collectSearchKeyword(value: any): void {
-    const keyword = this.pickString(value.keyword, value.query, value.search_query, value.searchQuery)
-    if (keyword && !this.searchKeywords.includes(keyword)) {
-      this.searchKeywords.push(keyword)
+    this.addSearchKeyword(this.pickString(value.keyword, value.query, value.search_query, value.searchQuery))
+  }
+
+  private collectSearchKeywords(value: any, keyHint: string = '', depth: number = 0): void {
+    if (!value || depth > 8) return
+
+    const inKeywordContext = SEARCH_KEYWORD_KEY_PATTERN.test(keyHint)
+    if (typeof value === 'string') {
+      const parsed = this.tryParseJSON(value)
+      if (parsed) {
+        this.collectSearchKeywords(parsed, keyHint, depth + 1)
+      } else if (inKeywordContext) {
+        this.addSearchKeyword(value)
+      }
+      return
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        this.collectSearchKeywords(item, keyHint, depth + 1)
+      }
+      return
+    }
+
+    if (typeof value !== 'object') return
+
+    for (const [key, child] of Object.entries(value)) {
+      this.collectSearchKeywords(child, SEARCH_KEYWORD_KEY_PATTERN.test(key) ? key : keyHint, depth + 1)
+    }
+  }
+
+  private addSearchKeyword(keyword: string): void {
+    const trimmed = keyword.trim()
+    if (
+      trimmed
+      && !/^https?:\/\//i.test(trimmed)
+      && !/^搜索\s*\d+\s*个?关键词.*参考\s*\d+\s*篇?资料/.test(trimmed)
+      && !/^\d+$/.test(trimmed)
+      && !/^[0-9a-f]{8}-[0-9a-f-]{13,}$/i.test(trimmed)
+      && !(/^[A-Za-z0-9_-]{8,}$/.test(trimmed) && !/[\s\u3400-\u9fff]/.test(trimmed))
+      && !this.searchKeywords.includes(trimmed)
+    ) {
+      this.searchKeywords.push(trimmed)
     }
   }
 
@@ -809,6 +1007,16 @@ export class DoubaoStreamHandler {
       }
     }
     return ''
+  }
+
+  private pickNumber(...values: any[]): number | undefined {
+    for (const value of values) {
+      if (typeof value === 'number' && Number.isFinite(value)) return value
+      if (typeof value === 'string' && value.trim() && /^\d+$/.test(value.trim())) {
+        return Number(value.trim())
+      }
+    }
+    return undefined
   }
 
   private pickUrl(...values: any[]): string {

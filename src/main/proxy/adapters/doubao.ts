@@ -5,9 +5,10 @@
 
 import { BrowserWindow, session as electronSession, type Session } from 'electron'
 import { randomBytes, randomUUID } from 'crypto'
-import { Readable } from 'stream'
+import { PassThrough, Readable } from 'stream'
 import type { Account, Provider } from '../../store/types'
 import type { ChatMessage } from '../types'
+import { localRelayProxyManager, type LocalRelayProxyHandle } from '../localRelayProxy'
 import type { OutboundProxyContext } from '../proxyTransport'
 
 const DOUBAO_WEB_BASE = 'https://www.doubao.com'
@@ -16,8 +17,10 @@ const DOUBAO_COMPLETION_URL = `${DOUBAO_WEB_BASE}/chat/completion`
 const DOUBAO_SHARE_TOKEN_URL = `${DOUBAO_WEB_BASE}/im/message/share/share_token`
 const DOUBAO_SHARE_SAVE_URL = `${DOUBAO_WEB_BASE}/im/message/share/save`
 const DOUBAO_USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36'
+const DOUBAO_PC_VERSION = '3.23.3'
 const DEFAULT_DOUBAO_BOT_ID = '7338286299411103781'
+const DOUBAO_STREAM_CHUNK_PREFIX = '__CHAT2API_DOUBAO_CHUNK__'
 const DOUBAO_BOT_ID_ALIASES: Record<string, string> = {
   doubao: DEFAULT_DOUBAO_BOT_ID,
   'doubao-pro': DEFAULT_DOUBAO_BOT_ID,
@@ -49,6 +52,7 @@ interface DoubaoBrowserShareAttempt {
   url?: string
   body?: string
   json?: any
+  request?: any
 }
 
 interface DoubaoBrowserShareResult {
@@ -83,6 +87,7 @@ interface ParsedDoubaoConversationMeta {
   localConversationId?: string
   sectionId?: string
   messageId?: string
+  messageIndex?: number
 }
 
 const JS_STREAM_DOUBAO = `
@@ -109,17 +114,57 @@ async (args) => {
     return match ? match[0] : '';
   };
 
+  const emitStreamChunk = text => {
+    if (!args.streamTraceId || !text) return;
+    try {
+      const bytes = new TextEncoder().encode(text);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      console.log('${DOUBAO_STREAM_CHUNK_PREFIX}' + JSON.stringify({
+        traceId: args.streamTraceId,
+        b64: btoa(binary),
+      }));
+    } catch (_) {}
+  };
+
   const extractDeviceParams = () => {
     let deviceId = '', webId = '';
     try {
+      const params = new URLSearchParams(location.search);
+      deviceId = params.get('device_id') || '';
+      webId = params.get('web_id') || '';
+    } catch (_) {}
+    try {
       const samWeb = JSON.parse(localStorage.getItem('samantha_web_web_id') || '{}');
-      deviceId = samWeb.web_id || '';
+      deviceId = deviceId || samWeb.device_id || samWeb.web_id || '';
+      webId = webId || samWeb.web_id || samWeb.device_id || '';
     } catch (_) {}
     try {
       const tea = JSON.parse(localStorage.getItem('__tea_cache_tokens_497858') || '{}');
-      webId = tea.web_id || '';
+      deviceId = deviceId || tea.device_id || tea.web_id || '';
+      webId = webId || tea.web_id || tea.user_unique_id || '';
     } catch (_) {}
     return { deviceId: deviceId || webId, webId: webId || deviceId };
+  };
+
+  const getWebTabId = () => {
+    try {
+      const existing = sessionStorage.getItem('chat2api_doubao_web_tab_id');
+      if (existing) return existing;
+      const created = globalThis.crypto && globalThis.crypto.randomUUID
+        ? globalThis.crypto.randomUUID()
+        : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+            const r = Math.random() * 16 | 0;
+            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+          });
+      sessionStorage.setItem('chat2api_doubao_web_tab_id', created);
+      return created;
+    } catch (_) {
+      return '';
+    }
   };
 
   const buildUrl = (baseUrl, fp, deviceId, webId) => {
@@ -129,14 +174,18 @@ async (args) => {
       device_platform: 'web',
       fp: fp,
       language: 'zh',
-      pc_version: '3.19.4',
+      pc_version: args.pcVersion || '${DOUBAO_PC_VERSION}',
       pkg_type: 'release_version',
       real_aid: '497858',
+      region: 'CN',
       samantha_web: '1',
+      sys_region: 'CN',
       tea_uuid: webId,
       'use-olympus-account': '1',
       version_code: '20800',
       web_id: webId,
+      web_platform: 'browser',
+      web_tab_id: getWebTabId(),
     };
     const qs = Object.entries(params)
       .filter(([, v]) => v)
@@ -183,9 +232,13 @@ async (args) => {
     while (true) {
       const item = await reader.read();
       if (item.done) break;
-      body += decoder.decode(item.value, { stream: true });
+      const text = decoder.decode(item.value, { stream: true });
+      body += text;
+      emitStreamChunk(text);
     }
-    body += decoder.decode();
+    const tail = decoder.decode();
+    body += tail;
+    emitStreamChunk(tail);
     return { status: res.status, body, fetch_hook: fetchStr, hooked, page_url: location.href, url: res.url, body_len: body.length };
   } catch (error) {
     return {
@@ -207,6 +260,74 @@ async (args) => {
   const hooked = !/native code/i.test(fetchStr);
 
   const isObject = value => value && typeof value === 'object';
+  const extractDeviceParams = () => {
+    let deviceId = '', webId = '';
+    try {
+      const params = new URLSearchParams(location.search);
+      deviceId = params.get('device_id') || '';
+      webId = params.get('web_id') || '';
+    } catch (_) {}
+    try {
+      const samWeb = JSON.parse(localStorage.getItem('samantha_web_web_id') || '{}');
+      deviceId = deviceId || samWeb.device_id || samWeb.web_id || '';
+      webId = webId || samWeb.web_id || samWeb.device_id || '';
+    } catch (_) {}
+    try {
+      const tea = JSON.parse(localStorage.getItem('__tea_cache_tokens_497858') || '{}');
+      deviceId = deviceId || tea.device_id || tea.web_id || '';
+      webId = webId || tea.web_id || tea.user_unique_id || '';
+    } catch (_) {}
+    return { deviceId: deviceId || webId, webId: webId || deviceId };
+  };
+  const getWebTabId = () => {
+    try {
+      const existing = sessionStorage.getItem('chat2api_doubao_web_tab_id');
+      if (existing) return existing;
+      const created = globalThis.crypto && globalThis.crypto.randomUUID
+        ? globalThis.crypto.randomUUID()
+        : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+            const r = Math.random() * 16 | 0;
+            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+          });
+      sessionStorage.setItem('chat2api_doubao_web_tab_id', created);
+      return created;
+    } catch (_) {
+      return '';
+    }
+  };
+  const buildApiUrl = endpoint => {
+    const { deviceId, webId } = extractDeviceParams();
+    const params = {
+      version_code: '20800',
+      language: 'zh',
+      device_platform: 'web',
+      aid: '497858',
+      real_aid: '497858',
+      pkg_type: 'release_version',
+      device_id: deviceId,
+      pc_version: args.pcVersion || '${DOUBAO_PC_VERSION}',
+      web_id: webId,
+      tea_uuid: webId,
+      region: 'CN',
+      sys_region: 'CN',
+      samantha_web: '1',
+      web_platform: 'browser',
+      'use-olympus-account': '1',
+      web_tab_id: getWebTabId(),
+    };
+    try {
+      const url = new URL(endpoint, args.baseUrl);
+      for (const [key, value] of Object.entries(params)) {
+        if (value && !url.searchParams.has(key)) {
+          url.searchParams.set(key, value);
+        }
+      }
+      return url.toString();
+    } catch (_) {
+      return endpoint;
+    }
+  };
   const normalizeUrl = value => {
     if (typeof value !== 'string' || !value) return '';
     if (/^https?:\\/\\//i.test(value)) return value;
@@ -217,7 +338,7 @@ async (args) => {
     if (!value || seen.has(value)) return {};
     if (typeof value === 'string') {
       const url = normalizeUrl(value);
-      if (url && /doubao\\.com\\/(thread|share)\\//i.test(url)) return { share_url: url };
+      if (url && /doubao\\.com\\/(?:thread|share|chat\\/share)\\//i.test(url)) return { share_url: url };
       if (/^[A-Za-z0-9_-]{8,}$/.test(value) && !/^\\d+$/.test(value)) return { share_id: value };
       return {};
     }
@@ -225,7 +346,7 @@ async (args) => {
     seen.add(value);
     for (const key of ['share_url', 'shareUrl', 'share_link', 'shareLink', 'copy_link', 'copyLink', 'url', 'link', 'href']) {
       const url = normalizeUrl(value[key]);
-      if (url && /doubao\\.com\\/(thread|share)\\//i.test(url)) return { share_url: url };
+      if (url && /doubao\\.com\\/(?:thread|share|chat\\/share)\\//i.test(url)) return { share_url: url };
     }
     for (const key of ['share_id', 'shareId', 'share_token', 'shareToken', 'token', 'id']) {
       if (typeof value[key] === 'string' && /^[A-Za-z0-9_-]{8,}$/.test(value[key]) && !/^\\d+$/.test(value[key])) {
@@ -244,7 +365,7 @@ async (args) => {
       method: 'POST',
       headers: {
         'Accept': 'application/json, text/plain, */*',
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json; encoding=utf-8',
         'Agw-Js-Conv': 'str',
       },
       body: JSON.stringify(body || {}),
@@ -256,28 +377,66 @@ async (args) => {
       json = text ? JSON.parse(text) : null;
     } catch (_) {}
     const found = findShareValue(json || text);
-    return { status: res.status, url: res.url, body: text, json, ...found };
+    return { status: res.status, url: res.url, body: text, json, request: body || {}, ...found };
   };
 
   const attempts = [];
-  const bodies = [
-    { thread_id: args.conversationId, conversation_id: args.conversationId },
-    { conversation_id: args.conversationId },
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  if (args.delayMs) {
+    await wait(args.delayMs);
+  }
+
+  const conversationId = args.conversationId;
+  const messageId = args.messageId || '';
+  const messageIndex = Number.isFinite(args.messageIndex) ? args.messageIndex : undefined;
+  const tokenBodies = [
+    { conversation_id: conversationId },
+    { conv_id: conversationId },
+  ];
+  const saveBodies = [
+    {
+      conv_id: conversationId,
+      ...(messageId ? { message_id_list: [messageId] } : {}),
+      ...(messageIndex !== undefined ? { message_index_list: [messageIndex] } : {}),
+      enable_generate_title: true,
+      is_allow_seo: true,
+      share_total_conversation: true,
+    },
+    {
+      conversation_id: conversationId,
+      ...(messageId ? { message_id_list: [messageId] } : {}),
+      ...(messageIndex !== undefined ? { message_index_list: [messageIndex] } : {}),
+      enable_generate_title: true,
+      is_allow_seo: true,
+      share_total_conversation: true,
+    },
   ];
 
   try {
-    for (const body of bodies) {
-      const result = await postJson(args.infoUrl, body);
+    const infoUrl = buildApiUrl(args.infoUrl);
+    const saveUrl = buildApiUrl(args.saveUrl);
+
+    for (const body of tokenBodies) {
+      const result = await postJson(infoUrl, body);
       attempts.push({ endpoint: 'info', ...result });
-      if (result.share_url || result.share_id) {
-        return { hooked, fetch_hook: fetchStr, page_url: location.href, attempts, share_url: result.share_url || '', share_id: result.share_id || '' };
+      const shareToken = result.share_id || result.share_token || result.shareToken || result.json?.data?.share_token || result.json?.data?.shareToken;
+      const expandedSaveBodies = shareToken
+        ? saveBodies.map(saveBody => ({ ...saveBody, share_token: shareToken }))
+        : saveBodies;
+
+      for (const saveBody of expandedSaveBodies) {
+        const saveResult = await postJson(saveUrl, saveBody);
+        attempts.push({ endpoint: 'save', ...saveResult });
+        if (saveResult.share_url) {
+          return { hooked, fetch_hook: fetchStr, page_url: location.href, attempts, share_url: saveResult.share_url || '', share_id: saveResult.share_id || '' };
+        }
       }
     }
 
-    for (const body of [...bodies, {}]) {
-      const result = await postJson(args.saveUrl, body);
+    for (const body of saveBodies) {
+      const result = await postJson(saveUrl, body);
       attempts.push({ endpoint: 'save', ...result });
-      if (result.share_url || result.share_id) {
+      if (result.share_url) {
         return { hooked, fetch_hook: fetchStr, page_url: location.href, attempts, share_url: result.share_url || '', share_id: result.share_id || '' };
       }
     }
@@ -399,12 +558,12 @@ function createDoubaoThreadShareUrl(shareId: string): string {
 
 function normalizeDoubaoShareUrl(value: unknown): string {
   if (typeof value !== 'string' || !value) return ''
-  if (/^https?:\/\//i.test(value) && /doubao\.com\/(thread|share)\//i.test(value)) {
+  if (/^https?:\/\//i.test(value) && /doubao\.com\/(?:thread|share|chat\/share)\//i.test(value)) {
     return value
   }
   if (value.startsWith('/')) {
     const url = new URL(value, DOUBAO_WEB_BASE).toString()
-    return /doubao\.com\/(thread|share)\//i.test(url) ? url : ''
+    return /doubao\.com\/(?:thread|share|chat\/share)\//i.test(url) ? url : ''
   }
   return ''
 }
@@ -414,6 +573,10 @@ function normalizeShareId(value: unknown): string {
   const trimmed = value.trim()
   if (!trimmed || /^\d+$/.test(trimmed)) return ''
   return /^[A-Za-z0-9_-]{8,}$/.test(trimmed) ? trimmed : ''
+}
+
+function createDoubaoMetadataSSE(metadata: DoubaoResponseMetadata): string {
+  return `event: CHAT2API_METADATA\ndata: ${JSON.stringify(metadata)}\n\n`
 }
 
 function sanitizePartitionId(value: string): string {
@@ -492,8 +655,69 @@ function parseDoubaoSSEEventBlock(block: string): { event: string; data: any } |
   }
 }
 
+function pickDoubaoNumber(...values: any[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'string' && value.trim() && /^\d+$/.test(value.trim())) {
+      return Number(value.trim())
+    }
+  }
+  return undefined
+}
+
+function pickDoubaoString(...values: any[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+  return ''
+}
+
+function isKnownDoubaoUserMessage(message: any, userMessageIds: Set<string>): boolean {
+  const ids = [
+    message?.message_id,
+    message?.local_message_id,
+    message?.id,
+    message?.meta?.message_id,
+    message?.meta?.local_message_id,
+  ]
+  if (ids.some(id => id && userMessageIds.has(String(id)))) {
+    return true
+  }
+
+  const role = pickDoubaoString(message?.role, message?.sender_role, message?.message_role, message?.sender?.role)
+  if (/user|human/i.test(role)) return true
+
+  const messageType = pickDoubaoString(message?.message_type, message?.type, message?.sender_type)
+  return /user|human/i.test(messageType)
+}
+
+function applyAssistantMessageMeta(meta: ParsedDoubaoConversationMeta, message: any, userMessageIds: Set<string>): void {
+  if (!message || typeof message !== 'object' || isKnownDoubaoUserMessage(message, userMessageIds)) return
+
+  const messageMeta = message.meta || {}
+  if (message.message_id || messageMeta.message_id) {
+    meta.messageId = message.message_id || messageMeta.message_id
+  }
+  if ((message.section_id || messageMeta.section_id) && !meta.sectionId) {
+    meta.sectionId = message.section_id || messageMeta.section_id
+  }
+
+  const messageIndex = pickDoubaoNumber(
+    message.index_in_conv,
+    messageMeta.index_in_conv,
+    message.message_index,
+    messageMeta.message_index,
+  )
+  if (messageIndex !== undefined) {
+    meta.messageIndex = messageIndex
+  }
+}
+
 function extractConversationMetaFromRawSSE(rawBody: string): ParsedDoubaoConversationMeta {
   const meta: ParsedDoubaoConversationMeta = {}
+  const userMessageIds = new Set<string>()
   const normalized = rawBody.replace(/\r\n/g, '\n')
 
   for (const block of normalized.split(/\n\n+/)) {
@@ -511,14 +735,15 @@ function extractConversationMetaFromRawSSE(rawBody: string): ParsedDoubaoConvers
       if (ack.section_id) {
         meta.sectionId = ack.section_id
       }
+      for (const item of Array.isArray(event.data?.query_list) ? event.data.query_list : []) {
+        if (item?.question_id) userMessageIds.add(String(item.question_id))
+        if (item?.local_message_id) userMessageIds.add(String(item.local_message_id))
+      }
     } else if (event.event === 'STREAM_MSG_NOTIFY') {
       const streamMeta = event.data?.meta || {}
-      if (streamMeta.message_id) {
-        meta.messageId = streamMeta.message_id
-      }
-      if (streamMeta.section_id && !meta.sectionId) {
-        meta.sectionId = streamMeta.section_id
-      }
+      applyAssistantMessageMeta(meta, { ...event.data, meta: streamMeta }, userMessageIds)
+    } else if (event.event === 'FULL_MSG_NOTIFY') {
+      applyAssistantMessageMeta(meta, event.data?.message || event.data, userMessageIds)
     }
   }
 
@@ -560,6 +785,16 @@ export class DoubaoAdapter {
     const botId = resolveDoubaoBotId(request.model)
     const sessionState = createSessionState(botId)
     const payload = this.buildPayload(sessionState, prompt, request.enableThinking === true)
+
+    if (request.stream === true) {
+      const stream = await this.fetchInHiddenBrowserStream(payload, cookies)
+      return {
+        stream,
+        sessionId: sessionState.sessionId,
+        metadata: {},
+      }
+    }
+
     const { result, metadata } = await this.fetchInHiddenBrowser(payload, cookies)
 
     if (!result.status || result.status >= 400) {
@@ -649,7 +884,7 @@ export class DoubaoAdapter {
         shared_app_id: '',
         sse_recv_event_options: { support_chunk_delta: true },
         is_ai_playground: false,
-        is_old_user: false,
+        is_old_user: true,
         recovery_option: {
           is_recovery: false,
           req_create_time_sec: Math.floor(nowMs / 1000),
@@ -675,29 +910,31 @@ export class DoubaoAdapter {
   ): Promise<{ result: DoubaoBrowserFetchResult; metadata: DoubaoResponseMetadata }> {
     const partition = `persist:${sanitizePartitionId(`doubao-${this.account.id}`)}`
     const browserSession = electronSession.fromPartition(partition)
-
-    if (this.outboundProxy) {
-      await this.configureProxy(browserSession)
-    }
-
-    await this.injectCookies(browserSession, cookies)
-
-    const win = new BrowserWindow({
-      show: false,
-      width: 1280,
-      height: 900,
-      autoHideMenuBar: true,
-      webPreferences: {
-        session: browserSession,
-        nodeIntegration: false,
-        contextIsolation: true,
-        sandbox: true,
-        webSecurity: true,
-        javascript: true,
-      },
-    })
+    let relayHandle: LocalRelayProxyHandle | undefined
+    let win: BrowserWindow | undefined
 
     try {
+      if (this.outboundProxy) {
+        relayHandle = await this.configureProxy(browserSession)
+      }
+
+      await this.injectCookies(browserSession, cookies)
+
+      win = new BrowserWindow({
+        show: false,
+        width: 1280,
+        height: 900,
+        autoHideMenuBar: true,
+        webPreferences: {
+          session: browserSession,
+          nodeIntegration: false,
+          contextIsolation: true,
+          sandbox: true,
+          webSecurity: true,
+          javascript: true,
+        },
+      })
+
       win.webContents.setUserAgent(DOUBAO_USER_AGENT)
       await this.loadDoubaoPage(win)
       const hookState = await this.waitForDoubaoFetchHook(win)
@@ -729,18 +966,126 @@ export class DoubaoAdapter {
         metadata,
       }
     } finally {
-      if (!win.isDestroyed()) {
+      if (win && !win.isDestroyed()) {
         win.close()
       }
+      relayHandle?.release()
     }
   }
 
-  private async configureProxy(browserSession: Session): Promise<void> {
-    if (!this.outboundProxy) return
+  private async fetchInHiddenBrowserStream(
+    payload: Record<string, unknown>,
+    cookies: Record<string, string>
+  ): Promise<NodeJS.ReadableStream> {
+    const partition = `persist:${sanitizePartitionId(`doubao-${this.account.id}`)}`
+    const browserSession = electronSession.fromPartition(partition)
+    let relayHandle: LocalRelayProxyHandle | undefined
+    let win: BrowserWindow | undefined
+    const rawStream = new PassThrough()
+    const rawChunks: Buffer[] = []
+    const streamTraceId = randomHex(16)
+
+    try {
+      if (this.outboundProxy) {
+        relayHandle = await this.configureProxy(browserSession)
+      }
+
+      await this.injectCookies(browserSession, cookies)
+
+      win = new BrowserWindow({
+        show: false,
+        width: 1280,
+        height: 900,
+        autoHideMenuBar: true,
+        webPreferences: {
+          session: browserSession,
+          nodeIntegration: false,
+          contextIsolation: true,
+          sandbox: true,
+          webSecurity: true,
+          javascript: true,
+        },
+      })
+
+      win.webContents.setUserAgent(DOUBAO_USER_AGENT)
+      await this.loadDoubaoPage(win)
+      const hookState = await this.waitForDoubaoFetchHook(win)
+      if (!hookState.hooked) {
+        console.warn('[Doubao] window.fetch still looks native; continuing so the response can expose diagnostics:', hookState)
+      }
+
+      win.webContents.on('console-message', (_event: any, _level: any, message: string) => {
+        if (typeof message !== 'string' || !message.startsWith(DOUBAO_STREAM_CHUNK_PREFIX)) return
+
+        try {
+          const payloadText = message.slice(DOUBAO_STREAM_CHUNK_PREFIX.length)
+          const payloadData = JSON.parse(payloadText)
+          if (payloadData?.traceId !== streamTraceId || typeof payloadData?.b64 !== 'string') return
+
+          const chunk = Buffer.from(payloadData.b64, 'base64')
+          rawChunks.push(chunk)
+          rawStream.write(chunk)
+        } catch (error) {
+          console.warn('[Doubao] Failed to decode streamed browser chunk:', error)
+        }
+      })
+
+      const args = {
+        url: DOUBAO_COMPLETION_URL,
+        payload,
+        traceId: randomHex(16),
+        streamTraceId,
+        fp: this.account.credentials.fp || '',
+        timeoutMs: 180000,
+      }
+      const script = `(${JS_STREAM_DOUBAO})(${JSON.stringify(args)})`
+
+      void win.webContents.executeJavaScript(script, true)
+        .then(async (result: DoubaoBrowserFetchResult) => {
+          const body = rawChunks.length > 0 ? Buffer.concat(rawChunks).toString('utf8') : String(result?.body || '')
+          if (!result?.status || result.status >= 400) {
+            const hookHint = result?.fetch_hook ? ` fetch=${result.fetch_hook}` : ''
+            const urlHint = result?.url ? ` url=${result.url}` : ''
+            rawStream.emit('error', new Error(`Doubao request failed: HTTP ${result?.status || 0}: ${String(result?.body || '').slice(0, 500)}${urlHint}${hookHint}`))
+            return
+          }
+
+          if (win && !win.isDestroyed()) {
+            const metadata = await this.createResponseMetadata(win, body)
+            rawStream.write(createDoubaoMetadataSSE(metadata))
+          }
+        })
+        .catch((error: unknown) => {
+          rawStream.emit('error', error instanceof Error ? error : new Error(String(error || 'Doubao stream failed')))
+        })
+        .finally(() => {
+          rawStream.end()
+          if (win && !win.isDestroyed()) {
+            win.close()
+          }
+          relayHandle?.release()
+        })
+
+      return rawStream
+    } catch (error) {
+      if (win && !win.isDestroyed()) {
+        win.close()
+      }
+      relayHandle?.release()
+      throw error
+    }
+  }
+
+  private async configureProxy(browserSession: Session): Promise<LocalRelayProxyHandle | undefined> {
+    if (!this.outboundProxy) return undefined
+
+    const relayHandle = await localRelayProxyManager.acquire(this.outboundProxy.node)
 
     await browserSession.setProxy({
-      proxyRules: this.outboundProxy.url,
+      proxyRules: relayHandle.proxyRules,
+      proxyBypassRules: '<-loopback>',
     })
+    return relayHandle
   }
 
   private async injectCookies(browserSession: Session, cookies: Record<string, string>): Promise<void> {
@@ -779,15 +1124,14 @@ export class DoubaoAdapter {
     }
 
     await this.openConversationPage(win, parsedMeta.conversationId)
+    await delay(2500)
 
-    const shareInfo = await this.fetchShareInfo(win, parsedMeta.conversationId)
+    const shareInfo = await this.fetchShareInfo(win, parsedMeta)
     if (shareInfo.share_id) {
       metadata.share_id = shareInfo.share_id
     }
     if (shareInfo.share_url) {
       metadata.share_url = shareInfo.share_url
-    } else if (shareInfo.share_id) {
-      metadata.share_url = createDoubaoThreadShareUrl(shareInfo.share_id)
     }
     if (shareInfo.error) {
       metadata.share_error = shareInfo.error
@@ -810,13 +1154,16 @@ export class DoubaoAdapter {
     }
   }
 
-  private async fetchShareInfo(win: BrowserWindow, conversationId: string): Promise<DoubaoBrowserShareResult> {
+  private async fetchShareInfo(win: BrowserWindow, meta: ParsedDoubaoConversationMeta): Promise<DoubaoBrowserShareResult> {
     try {
       const args = {
         baseUrl: DOUBAO_WEB_BASE,
         infoUrl: DOUBAO_SHARE_TOKEN_URL,
         saveUrl: DOUBAO_SHARE_SAVE_URL,
-        conversationId,
+        conversationId: meta.conversationId,
+        messageId: meta.messageId,
+        messageIndex: meta.messageIndex,
+        delayMs: 1000,
       }
       const script = `(${JS_SHARE_DOUBAO})(${JSON.stringify(args)})`
       const result = await win.webContents.executeJavaScript(script, true) as DoubaoBrowserShareResult
@@ -838,14 +1185,9 @@ export class DoubaoAdapter {
       return { ...result, share_url: directUrl }
     }
 
-    const directShareId = normalizeShareId(result.share_id)
-    if (directShareId) {
-      return { ...result, share_id: directShareId }
-    }
-
     for (const attempt of result.attempts || []) {
       const found = findShareInfoInValue(attempt.json ?? attempt.body)
-      if (found.share_url || found.share_id) {
+      if (found.share_url) {
         return {
           ...result,
           share_url: found.share_url,
@@ -854,7 +1196,12 @@ export class DoubaoAdapter {
       }
     }
 
-    return result
+    const directShareId = normalizeShareId(result.share_id)
+    return {
+      ...result,
+      ...(directShareId ? { share_id: directShareId } : {}),
+      error: result.error || 'Doubao share link was not returned by share/save; manual sharing may still work after the page finishes preparing.',
+    }
   }
 
   private async loadDoubaoPage(win: BrowserWindow): Promise<void> {
@@ -867,6 +1214,9 @@ export class DoubaoAdapter {
       ])
     } catch (error) {
       console.warn('[Doubao] Page load did not fully finish, continuing with current browser context:', error)
+      if (win.webContents.getURL().startsWith('chrome-error://')) {
+        throw new Error(`Doubao page load failed: ${error instanceof Error ? error.message : 'unknown error'}`)
+      }
       if (win.webContents.getURL() === '') {
         await win.loadURL(DOUBAO_WEB_BASE)
       }
