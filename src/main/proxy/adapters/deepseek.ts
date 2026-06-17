@@ -191,9 +191,7 @@ export class DeepSeekAdapter {
     this.outboundProxy = outboundProxy
     this.debugRaw = debugOptions?.raw === true
     this.debugLogFile = debugOptions?.logFile
-    console.log('[DeepSeek] Account credentials:', JSON.stringify(account.credentials, null, 2))
     this.token = account.credentials.token || account.credentials.apiKey || account.credentials.refreshToken || ''
-    console.log('[DeepSeek] Using token:', this.token.substring(0, 20) + '...')
   }
 
   setDebugOptions(options: { raw?: boolean; logFile?: string }): void {

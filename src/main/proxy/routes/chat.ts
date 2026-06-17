@@ -357,6 +357,7 @@ router.post('/completions', async (ctx: Context) => {
       // Collect stream content for logging (raw SSE output)
       let collectedContent = ''
       let streamClosed = false
+      let activeOutputStream: NodeJS.ReadableStream | undefined
       const includeFinalResponse = shouldIncludeFinalResponse(
         request,
         ctx.get('X-Include-Final-Response')
@@ -383,6 +384,14 @@ router.post('/completions', async (ctx: Context) => {
         console.error('[Chat] Stream error:', err.message)
         if (result.proxyId) {
           proxyPoolManager.markNodeFailed(result.proxyId, err.message)
+        }
+
+        activeOutputStream?.unpipe(wrapperStream)
+        const destroyableSource = result.stream as NodeJS.ReadableStream & { destroy?: () => void }
+        const destroyableOutput = activeOutputStream as (NodeJS.ReadableStream & { destroy?: () => void }) | undefined
+        destroyableOutput?.destroy?.()
+        if (destroyableOutput !== destroyableSource) {
+          destroyableSource.destroy?.()
         }
 
         // Send error as SSE event
@@ -419,9 +428,11 @@ router.post('/completions', async (ctx: Context) => {
           ? createFinalResponseTransform({ model: actualModel, responseId: requestId })
           : undefined
         const outputStream = finalResponseTransform || sourceStream
+        activeOutputStream = outputStream
 
         // Collect from final output so logs match the client-visible stream.
         outputStream.on('data', (chunk: Buffer) => {
+          if (streamClosed) return
           collectedContent += chunk.toString()
         })
 

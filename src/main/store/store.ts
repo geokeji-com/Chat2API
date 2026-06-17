@@ -436,18 +436,15 @@ class StoreManager {
    */
   encryptData(data: string): string {
     try {
-      console.log('[Store] encryptData input length:', data.length, 'content:', data.substring(0, 20) + '...')
       if (safeStorage.isEncryptionAvailable()) {
         // Create new Buffer to store encryption result
         const encrypted = Buffer.from(safeStorage.encryptString(data))
         const result = encrypted.toString('base64')
-        console.log('[Store] encryptData output length:', result.length, 'content:', result.substring(0, 20) + '...')
         // Verify encryption is correct
         const decrypted = safeStorage.decryptString(encrypted)
-        console.log('[Store] encryptData verify decryption:', decrypted.substring(0, 20) + '...', 'match:', decrypted === data)
         return result
       } else {
-        console.log('[Store] Encryption unavailable, returning original data')
+        console.warn('[Store] Encryption unavailable; storing secret without safeStorage protection')
       }
     } catch (error) {
       console.error('Failed to encrypt data:', error)
@@ -466,8 +463,9 @@ class StoreManager {
         const buffer = Buffer.from(encryptedData, 'base64')
         return safeStorage.decryptString(buffer)
       }
-    } catch (error) {
-      console.error('Failed to decrypt data:', error)
+    } catch (_) {
+      // Older imported proxy nodes may contain plaintext secrets. Treat them as
+      // legacy plaintext instead of logging noisy safeStorage stack traces.
     }
     return encryptedData
   }
@@ -701,13 +699,6 @@ class StoreManager {
       return null
     }
     
-    console.log('[Store] Update account:', {
-      id,
-      updatesCredentials: updates.credentials,
-      oldCredentials: accounts[index].credentials,
-      oldCredentialsDecrypted: this.decryptCredentials(accounts[index].credentials),
-    })
-    
     const updatedAccount: Account = {
       ...accounts[index],
       ...updates,
@@ -716,21 +707,10 @@ class StoreManager {
     
     if (updates.credentials) {
       updatedAccount.credentials = this.encryptCredentials(updates.credentials)
-      console.log('[Store] Encrypted credentials:', updatedAccount.credentials)
-      console.log('[Store] Old credentials:', accounts[index].credentials)
-      console.log('[Store] Credentials match:', JSON.stringify(updatedAccount.credentials) === JSON.stringify(accounts[index].credentials))
     }
     
     accounts[index] = updatedAccount
     this.store!.set('accounts', accounts)
-    
-    // Verify save was successful
-    const savedAccounts = this.store!.get('accounts') as Account[]
-    const savedAccount = savedAccounts.find(a => a.id === id)
-    console.log('[Store] Verify after save:', {
-      id,
-      savedCredentials: savedAccount?.credentials,
-    })
     
     return {
       ...updatedAccount,
