@@ -680,6 +680,7 @@ def citation_entries(value: Any) -> list[Any]:
             "results",
             "search_results",
             "searchResults",
+            "webPages",
             "items",
             "list",
         ]:
@@ -799,16 +800,27 @@ def extract_structured_fields(response: dict[str, Any]) -> dict[str, Any]:
     reasoning_content = clean_text(message.get("reasoning_content"))
     message_ids = first_non_empty(chat2api.get("message_ids"), chat2api.get("messageIds"))
 
+    raw_search_queries = first_non_empty(
+        message.get("search_queries"),
+        response.get("search_queries"),
+        chat2api.get("search_queries"),
+        message.get("searchQueries"),
+        response.get("searchQueries"),
+    )
+    if not raw_search_queries:
+        # doubao: keywords live inside search_results.keywords (not a top-level field)
+        search_results_val = first_non_empty(
+            message.get("search_results"),
+            response.get("search_results"),
+            chat2api.get("search_results"),
+        )
+        if isinstance(search_results_val, dict):
+            raw_search_queries = search_results_val.get("keywords")
+
     return {
         "answer": answer,
         "reasoningContent": reasoning_content,
-        "searchQueries": normalize_text_list(first_non_empty(
-            message.get("search_queries"),
-            response.get("search_queries"),
-            chat2api.get("search_queries"),
-            message.get("searchQueries"),
-            response.get("searchQueries"),
-        )),
+        "searchQueries": normalize_text_list(raw_search_queries),
         "relatedSearches": normalize_text_list(first_non_empty(
             message.get("related_searches"),
             response.get("related_searches"),
