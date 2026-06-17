@@ -15,6 +15,10 @@ electron.vite.config.d.ts
 vite.config.js
 vite.config.d.ts
 
+# Python cache
+__pycache__/
+*.py[cod]
+
 # Vite temp files
 *.mjs.tmp
 electron.vite.config.*.mjs
@@ -58,3 +62,6 @@ src/renderer/next-app/
 
 # Backup
 backup/
+
+# Local scratch files
+/temp
