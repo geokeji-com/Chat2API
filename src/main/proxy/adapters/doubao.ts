@@ -3,8 +3,10 @@
  * Uses an Electron hidden page to let Doubao's web runtime inject msToken/a_bogus.
  */
 
-import { BrowserWindow, session as electronSession, type Session } from 'electron'
+import { app, BrowserWindow, session as electronSession, type Session } from 'electron'
 import { randomBytes, randomUUID } from 'crypto'
+import { appendFileSync, mkdirSync } from 'fs'
+import { dirname, isAbsolute, join } from 'path'
 import { PassThrough, Readable } from 'stream'
 import type { Account, Provider } from '../../store/types'
 import type { ChatMessage } from '../types'
@@ -21,11 +23,45 @@ const DOUBAO_USER_AGENT =
 const DOUBAO_PC_VERSION = '3.23.3'
 const DEFAULT_DOUBAO_BOT_ID = '7338286299411103781'
 const DOUBAO_STREAM_CHUNK_PREFIX = '__CHAT2API_DOUBAO_CHUNK__'
+const DOUBAO_DEFAULT_DEBUG_LOG_FILE = 'logs/doubao-runtime.jsonl'
 const DOUBAO_BOT_ID_ALIASES: Record<string, string> = {
   doubao: DEFAULT_DOUBAO_BOT_ID,
   'doubao-pro': DEFAULT_DOUBAO_BOT_ID,
   'doubao-lite': DEFAULT_DOUBAO_BOT_ID,
   'doubao-thinking': DEFAULT_DOUBAO_BOT_ID,
+}
+
+function envFlag(name: string): boolean {
+  const value = process.env[name]
+  return /^(1|true|yes|on)$/i.test(String(value || '').trim())
+}
+
+function getElectronUserDataPath(): string {
+  try {
+    return app.getPath('userData')
+  } catch {
+    return process.cwd()
+  }
+}
+
+function resolveDoubaoDebugLogFile(): string | undefined {
+  const configured = process.env.CHAT2API_DOUBAO_DEBUG_LOG_FILE?.trim()
+  if (!configured) return undefined
+
+  const requested = /^(1|true|yes|on)$/i.test(configured)
+    ? DOUBAO_DEFAULT_DEBUG_LOG_FILE
+    : configured
+  return isAbsolute(requested)
+    ? requested
+    : join(getElectronUserDataPath(), requested)
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error || 'unknown error')
+}
+
+function summarizeFetchHook(value: unknown): string {
+  return typeof value === 'string' ? value.slice(0, 160) : ''
 }
 
 interface DoubaoChatCompletionRequest {
@@ -44,6 +80,12 @@ interface DoubaoBrowserFetchResult {
   url?: string
   hooked?: boolean
   page_url?: string
+  fp_present?: boolean
+  fp_len?: number
+  device_id_present?: boolean
+  device_id_len?: number
+  web_id_present?: boolean
+  web_id_len?: number
 }
 
 interface DoubaoBrowserShareAttempt {
@@ -202,6 +244,14 @@ async (args) => {
   if (fp) payload.ext.fp = fp;
   const { deviceId, webId } = extractDeviceParams();
   const url = buildUrl(args.url, fp, deviceId, webId);
+  const runtimeDiag = {
+    fp_present: Boolean(fp),
+    fp_len: fp ? String(fp).length : 0,
+    device_id_present: Boolean(deviceId),
+    device_id_len: deviceId ? String(deviceId).length : 0,
+    web_id_present: Boolean(webId),
+    web_id_len: webId ? String(webId).length : 0,
+  };
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), args.timeoutMs || 180000);
@@ -224,7 +274,7 @@ async (args) => {
     const reader = res.body && res.body.getReader ? res.body.getReader() : null;
     if (!reader) {
       const text = await res.text();
-      return { status: res.status, body: text, fetch_hook: fetchStr, hooked, page_url: location.href, url: res.url, body_len: text.length };
+      return { status: res.status, body: text, fetch_hook: fetchStr, hooked, page_url: location.href, url: res.url, body_len: text.length, ...runtimeDiag };
     }
 
     const decoder = new TextDecoder();
@@ -239,14 +289,15 @@ async (args) => {
     const tail = decoder.decode();
     body += tail;
     emitStreamChunk(tail);
-    return { status: res.status, body, fetch_hook: fetchStr, hooked, page_url: location.href, url: res.url, body_len: body.length };
+    return { status: res.status, body, fetch_hook: fetchStr, hooked, page_url: location.href, url: res.url, body_len: body.length, ...runtimeDiag };
   } catch (error) {
     return {
       status: 0,
       body: error && error.message ? ('JS error: ' + error.message) : 'JS error',
       fetch_hook: fetchStr,
       hooked,
-      page_url: location.href
+      page_url: location.href,
+      ...runtimeDiag
     };
   } finally {
     clearTimeout(timer);
@@ -767,6 +818,184 @@ export class DoubaoAdapter {
       || provider.apiEndpoint?.includes('doubao.com')
   }
 
+  private shouldShowDoubaoBrowser(): boolean {
+    return envFlag('CHAT2API_DOUBAO_SHOW_BROWSER')
+  }
+
+  private shouldKeepDoubaoBrowserOnError(): boolean {
+    return envFlag('CHAT2API_DOUBAO_KEEP_BROWSER_ON_ERROR')
+  }
+
+  private openDoubaoDevToolsIfNeeded(win: BrowserWindow): void {
+    if (!envFlag('CHAT2API_DOUBAO_OPEN_DEVTOOLS') || win.isDestroyed()) return
+    try {
+      if (!win.webContents.isDevToolsOpened()) {
+        win.webContents.openDevTools({ mode: 'detach' })
+      }
+    } catch (error) {
+      console.warn('[Doubao] Failed to open debug devtools:', error)
+    }
+  }
+
+  private createDoubaoWindow(browserSession: Session): BrowserWindow {
+    const show = this.shouldShowDoubaoBrowser()
+    const win = new BrowserWindow({
+      show,
+      title: 'Doubao - Chat2API',
+      width: 1280,
+      height: 900,
+      autoHideMenuBar: true,
+      webPreferences: {
+        session: browserSession,
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+        javascript: true,
+      },
+    })
+
+    win.webContents.setUserAgent(DOUBAO_USER_AGENT)
+    if (show) {
+      win.once('ready-to-show', () => {
+        if (win.isDestroyed()) return
+        win.show()
+        win.focus()
+      })
+    }
+    this.openDoubaoDevToolsIfNeeded(win)
+    return win
+  }
+
+  private keepDoubaoWindowForVerification(win: BrowserWindow | undefined, reason: string): boolean {
+    if (!win || win.isDestroyed() || !this.shouldKeepDoubaoBrowserOnError()) {
+      return false
+    }
+
+    try {
+      if (!win.isVisible()) {
+        win.show()
+      }
+      win.focus()
+      this.openDoubaoDevToolsIfNeeded(win)
+    } catch (error) {
+      console.warn('[Doubao] Failed to show verification window:', error)
+    }
+
+    this.logRuntimeProfile('browser.window.kept', {
+      reason,
+      pageUrl: win.webContents.getURL(),
+    })
+    console.warn('[Doubao] Keeping browser window open for manual verification. Close it when finished.')
+    return true
+  }
+
+  private closeDoubaoWindow(
+    win: BrowserWindow | undefined,
+    relayHandle: LocalRelayProxyHandle | undefined,
+    keepReason?: string
+  ): void {
+    const kept = keepReason ? this.keepDoubaoWindowForVerification(win, keepReason) : false
+    if (kept && win && !win.isDestroyed()) {
+      if (relayHandle) {
+        win.once('closed', () => relayHandle.release())
+      }
+      return
+    }
+
+    if (win && !win.isDestroyed()) {
+      win.close()
+    }
+    relayHandle?.release()
+  }
+
+  private createRuntimeContext(
+    partition?: string,
+    cookies?: Record<string, string>,
+    payload?: Record<string, unknown>
+  ): Record<string, unknown> {
+    const credentials = this.account.credentials || {}
+    const proxyNode = this.outboundProxy?.node
+    const clientMeta = payload?.client_meta as { bot_id?: unknown } | undefined
+    const botId = clientMeta?.bot_id
+
+    return {
+      providerId: this.provider.id,
+      accountId: this.account.id,
+      accountStatus: this.account.status,
+      appName: app.getName(),
+      appVersion: app.getVersion(),
+      isPackaged: app.isPackaged,
+      userDataPath: getElectronUserDataPath(),
+      partition,
+      botId: botId === undefined ? undefined : String(botId),
+      credentialSummary: {
+        hasSessionid: Boolean(credentials.sessionid || credentials.sessionId),
+        hasCookieHeader: Boolean(credentials.cookie),
+        hasFp: Boolean(credentials.fp),
+        fpLen: credentials.fp ? String(credentials.fp).length : 0,
+      },
+      cookieSummary: cookies ? {
+        names: Object.keys(cookies).sort(),
+        count: Object.keys(cookies).length,
+        hasSessionid: Boolean(cookies.sessionid),
+      } : undefined,
+      proxy: proxyNode ? {
+        id: proxyNode.id,
+        name: proxyNode.name,
+        host: proxyNode.host,
+        port: proxyNode.port,
+        province: proxyNode.province,
+        city: proxyNode.city,
+        status: proxyNode.status,
+      } : undefined,
+      showBrowser: this.shouldShowDoubaoBrowser(),
+      keepBrowserOnError: this.shouldKeepDoubaoBrowserOnError(),
+      debugLogFile: resolveDoubaoDebugLogFile(),
+    }
+  }
+
+  private summarizeFetchResult(result: DoubaoBrowserFetchResult | undefined): Record<string, unknown> {
+    return {
+      status: Number(result?.status || 0),
+      bodyLen: Number(result?.body_len || result?.body?.length || 0),
+      hooked: result?.hooked,
+      fetchHook: summarizeFetchHook(result?.fetch_hook),
+      pageUrl: result?.page_url,
+      responseUrl: result?.url,
+      fpPresent: result?.fp_present,
+      fpLen: result?.fp_len,
+      deviceIdPresent: result?.device_id_present,
+      deviceIdLen: result?.device_id_len,
+      webIdPresent: result?.web_id_present,
+      webIdLen: result?.web_id_len,
+    }
+  }
+
+  private logRuntimeProfile(event: string, data: Record<string, unknown> = {}): void {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      event,
+      ...data,
+    }
+
+    try {
+      console.log('[DoubaoRuntime]', JSON.stringify(entry))
+    } catch {
+      console.log('[DoubaoRuntime]', event)
+    }
+
+    const logFile = resolveDoubaoDebugLogFile()
+    if (!logFile) return
+
+    try {
+      mkdirSync(dirname(logFile), { recursive: true })
+      appendFileSync(logFile, `${JSON.stringify(entry)}\n`, 'utf8')
+    } catch (error) {
+      console.warn('[DoubaoRuntime] Failed to write debug log:', error)
+    }
+  }
+
   async chatCompletion(request: DoubaoChatCompletionRequest): Promise<{
     stream: NodeJS.ReadableStream
     sessionId: string
@@ -912,32 +1141,34 @@ export class DoubaoAdapter {
     const browserSession = electronSession.fromPartition(partition)
     let relayHandle: LocalRelayProxyHandle | undefined
     let win: BrowserWindow | undefined
+    let keepWindowReason: string | undefined
+    const runtimeContext = this.createRuntimeContext(partition, cookies, payload)
 
     try {
+      this.logRuntimeProfile('nonstream.start', runtimeContext)
+
       if (this.outboundProxy) {
         relayHandle = await this.configureProxy(browserSession)
+        this.logRuntimeProfile('nonstream.proxy.configured', {
+          ...runtimeContext,
+          relayPort: relayHandle?.port,
+          proxyRules: relayHandle?.proxyRules,
+        })
       }
 
       await this.injectCookies(browserSession, cookies)
 
-      win = new BrowserWindow({
-        show: false,
-        width: 1280,
-        height: 900,
-        autoHideMenuBar: true,
-        webPreferences: {
-          session: browserSession,
-          nodeIntegration: false,
-          contextIsolation: true,
-          sandbox: true,
-          webSecurity: true,
-          javascript: true,
-        },
-      })
-
-      win.webContents.setUserAgent(DOUBAO_USER_AGENT)
+      win = this.createDoubaoWindow(browserSession)
       await this.loadDoubaoPage(win)
       const hookState = await this.waitForDoubaoFetchHook(win)
+      this.logRuntimeProfile('nonstream.page.ready', {
+        ...runtimeContext,
+        hookState: {
+          hooked: hookState.hooked,
+          fetchHook: summarizeFetchHook(hookState.fetchHook),
+          pageUrl: hookState.pageUrl,
+        },
+      })
       if (!hookState.hooked) {
         console.warn('[Doubao] window.fetch still looks native; continuing so the response can expose diagnostics:', hookState)
       }
@@ -959,17 +1190,40 @@ export class DoubaoAdapter {
         hooked: result?.hooked,
         page_url: result?.page_url,
         url: result?.url,
+        fp_present: result?.fp_present,
+        fp_len: result?.fp_len,
+        device_id_present: result?.device_id_present,
+        device_id_len: result?.device_id_len,
+        web_id_present: result?.web_id_present,
+        web_id_len: result?.web_id_len,
+      }
+      this.logRuntimeProfile('nonstream.result', {
+        ...runtimeContext,
+        result: this.summarizeFetchResult(normalizedResult),
+      })
+
+      if (!normalizedResult.status || normalizedResult.status >= 400) {
+        keepWindowReason = `http-${normalizedResult.status || 0}`
+        return {
+          result: normalizedResult,
+          metadata: {},
+        }
       }
       const metadata = await this.createResponseMetadata(win, normalizedResult.body)
       return {
         result: normalizedResult,
         metadata,
       }
+    } catch (error) {
+      keepWindowReason = keepWindowReason || 'exception'
+      this.logRuntimeProfile('nonstream.error', {
+        ...runtimeContext,
+        error: formatErrorMessage(error),
+        pageUrl: win && !win.isDestroyed() ? win.webContents.getURL() : undefined,
+      })
+      throw error
     } finally {
-      if (win && !win.isDestroyed()) {
-        win.close()
-      }
-      relayHandle?.release()
+      this.closeDoubaoWindow(win, relayHandle, keepWindowReason)
     }
   }
 
@@ -981,35 +1235,37 @@ export class DoubaoAdapter {
     const browserSession = electronSession.fromPartition(partition)
     let relayHandle: LocalRelayProxyHandle | undefined
     let win: BrowserWindow | undefined
+    let keepWindowReason: string | undefined
     const rawStream = new PassThrough()
     const rawChunks: Buffer[] = []
     const streamTraceId = randomHex(16)
+    const runtimeContext = this.createRuntimeContext(partition, cookies, payload)
 
     try {
+      this.logRuntimeProfile('stream.start', runtimeContext)
+
       if (this.outboundProxy) {
         relayHandle = await this.configureProxy(browserSession)
+        this.logRuntimeProfile('stream.proxy.configured', {
+          ...runtimeContext,
+          relayPort: relayHandle?.port,
+          proxyRules: relayHandle?.proxyRules,
+        })
       }
 
       await this.injectCookies(browserSession, cookies)
 
-      win = new BrowserWindow({
-        show: false,
-        width: 1280,
-        height: 900,
-        autoHideMenuBar: true,
-        webPreferences: {
-          session: browserSession,
-          nodeIntegration: false,
-          contextIsolation: true,
-          sandbox: true,
-          webSecurity: true,
-          javascript: true,
-        },
-      })
-
-      win.webContents.setUserAgent(DOUBAO_USER_AGENT)
+      win = this.createDoubaoWindow(browserSession)
       await this.loadDoubaoPage(win)
       const hookState = await this.waitForDoubaoFetchHook(win)
+      this.logRuntimeProfile('stream.page.ready', {
+        ...runtimeContext,
+        hookState: {
+          hooked: hookState.hooked,
+          fetchHook: summarizeFetchHook(hookState.fetchHook),
+          pageUrl: hookState.pageUrl,
+        },
+      })
       if (!hookState.hooked) {
         console.warn('[Doubao] window.fetch still looks native; continuing so the response can expose diagnostics:', hookState)
       }
@@ -1043,7 +1299,16 @@ export class DoubaoAdapter {
       void win.webContents.executeJavaScript(script, true)
         .then(async (result: DoubaoBrowserFetchResult) => {
           const body = rawChunks.length > 0 ? Buffer.concat(rawChunks).toString('utf8') : String(result?.body || '')
+          this.logRuntimeProfile('stream.result', {
+            ...runtimeContext,
+            result: this.summarizeFetchResult({
+              ...result,
+              body,
+              body_len: rawChunks.length > 0 ? body.length : result?.body_len,
+            }),
+          })
           if (!result?.status || result.status >= 400) {
+            keepWindowReason = `http-${result?.status || 0}`
             const hookHint = result?.fetch_hook ? ` fetch=${result.fetch_hook}` : ''
             const urlHint = result?.url ? ` url=${result.url}` : ''
             rawStream.emit('error', new Error(`Doubao request failed: HTTP ${result?.status || 0}: ${String(result?.body || '').slice(0, 500)}${urlHint}${hookHint}`))
@@ -1056,22 +1321,28 @@ export class DoubaoAdapter {
           }
         })
         .catch((error: unknown) => {
+          keepWindowReason = keepWindowReason || 'exception'
+          this.logRuntimeProfile('stream.error', {
+            ...runtimeContext,
+            error: formatErrorMessage(error),
+            pageUrl: win && !win.isDestroyed() ? win.webContents.getURL() : undefined,
+          })
           rawStream.emit('error', error instanceof Error ? error : new Error(String(error || 'Doubao stream failed')))
         })
         .finally(() => {
           rawStream.end()
-          if (win && !win.isDestroyed()) {
-            win.close()
-          }
-          relayHandle?.release()
+          this.closeDoubaoWindow(win, relayHandle, keepWindowReason)
         })
 
       return rawStream
     } catch (error) {
-      if (win && !win.isDestroyed()) {
-        win.close()
-      }
-      relayHandle?.release()
+      keepWindowReason = keepWindowReason || 'exception'
+      this.logRuntimeProfile('stream.setup.error', {
+        ...runtimeContext,
+        error: formatErrorMessage(error),
+        pageUrl: win && !win.isDestroyed() ? win.webContents.getURL() : undefined,
+      })
+      this.closeDoubaoWindow(win, relayHandle, keepWindowReason)
       throw error
     }
   }

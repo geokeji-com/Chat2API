@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from 'electron'
+import { homedir } from 'os'
 import { join } from 'path'
 import { createWindow, getMainWindow, loadUrl, loadFile, openDevTools } from './window/manager'
 import { createTrayManager, TrayManager } from './tray/TrayManager'
@@ -31,6 +32,11 @@ if (process.env.CHAT2API_DISABLE_BACKGROUND_NETWORKING === 'true') {
   app.commandLine.appendSwitch('metrics-recording-only')
   app.commandLine.appendSwitch('no-first-run')
 }
+
+const userDataPath = process.env.CHAT2API_USER_DATA_DIR || join(homedir(), '.chat2api', 'electron-profile')
+app.setName('chat2api')
+app.setPath('userData', userDataPath)
+console.log('[App] Electron userData path:', userDataPath)
 
 // Workaround for V8 JIT compiler crash on macOS ARM64 (Electron 33 bug)
 // Completely disable JIT compilation to prevent EXC_BAD_ACCESS crashes
