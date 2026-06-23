@@ -34,6 +34,15 @@ KIMI_CITE_REF_RE = re.compile(r"(?:cite)?web_search:\d+#(\d+)")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DEBUG_LOG_DIR = os.path.join(PROJECT_ROOT, "logs", "platform-calls")
 SENSITIVE_KEY_RE = re.compile(r"authorization|cookie|token|secret|password|credential|x-ds-pow-response|set-cookie", re.I)
+PROXY_HEADER_NAMES = {
+    "mode": "X-Chat2API-Proxy-Mode",
+    "id": "X-Chat2API-Proxy-Id",
+    "name": "X-Chat2API-Proxy-Name",
+    "host": "X-Chat2API-Proxy-Host",
+    "port": "X-Chat2API-Proxy-Port",
+    "address": "X-Chat2API-Proxy-Address",
+}
+INTERNAL_PROXY_ROUTE_KEY = "__chat2api_proxy_route"
 
 
 PLATFORMS: dict[str, dict[str, Any]] = {
@@ -321,8 +330,12 @@ def post_chat_completion(url: str, payload: dict[str, Any], api_key: str | None,
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             content_type = response.headers.get("Content-Type", "")
+            proxy_route = extract_proxy_route_from_headers(response.headers)
             if "text/event-stream" in content_type:
-                return read_sse_final_response(response, debug_raw)
+                data = read_sse_final_response(response, debug_raw)
+                if proxy_route:
+                    data[INTERNAL_PROXY_ROUTE_KEY] = proxy_route
+                return data
             text = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
@@ -341,6 +354,8 @@ def post_chat_completion(url: str, payload: dict[str, Any], api_key: str | None,
         data["__chat2api_debug"] = {
             "raw_response_text": text,
         }
+    if proxy_route:
+        data[INTERNAL_PROXY_ROUTE_KEY] = proxy_route
     return data
 
 
@@ -640,6 +655,44 @@ def pick_int(*values: Any) -> int | None:
         if isinstance(value, str) and value.strip().isdigit():
             return int(value.strip())
     return None
+
+
+def extract_proxy_route_from_headers(headers: Any) -> dict[str, Any] | None:
+    route: dict[str, Any] = {}
+    for key, header_name in PROXY_HEADER_NAMES.items():
+        value = headers.get(header_name) if headers is not None else None
+        if value not in (None, ""):
+            route[key] = value
+    return route or None
+
+
+def normalize_proxy_info(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+
+    mode = clean_text(value.get("mode"))
+    host = clean_text(first_non_empty(value.get("host"), value.get("ip")))
+    port = pick_int(value.get("port"))
+
+    if mode and mode != "proxy":
+        return None
+    if not host or port is None:
+        return None
+
+    return {
+        "ip": host,
+        "port": port,
+        "address": f"{host}:{port}",
+    }
+
+
+def extract_proxy_info(response: dict[str, Any]) -> dict[str, Any] | None:
+    message = extract_message(response)
+    chat2api = extract_chat2api(response, message)
+    return (
+        normalize_proxy_info(chat2api.get("proxy"))
+        or normalize_proxy_info(response.get(INTERNAL_PROXY_ROUTE_KEY))
+    )
 
 
 def normalize_text_list(value: Any) -> list[str]:
@@ -1001,6 +1054,10 @@ def main() -> int:
             },
         })
     response = post_chat_completion(chat_endpoint(args.base_url), payload, args.api_key, args.timeout, debug_raw)
+    proxy_info = extract_proxy_info(response)
+    if not proxy_info:
+        raise SystemExit("Missing proxy information in Chat2API response")
+
     structured = extract_structured_fields(response)
     if platform_id in ("kimi", "qwen"):
         structured["citations"] = filter_cited_citations(structured["answer"], structured["citations"], platform_id)
@@ -1020,6 +1077,7 @@ def main() -> int:
         "proxyCity": proxy_city,
         "cityStatus": city_status,
         "model": model,
+        "proxy": proxy_info,
         "answer": structured["answer"],
         "reasoningContent": structured["reasoningContent"],
         "searchQueries": structured["searchQueries"],
