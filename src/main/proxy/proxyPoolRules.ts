@@ -1,6 +1,6 @@
 import type { Account, AccountProxyMode, ProxyNode } from '../store/types'
 
-type ProxyAccountView = Pick<Account, 'id' | 'providerId' | 'status' | 'proxyMode' | 'proxyBinding'>
+type ProxyAccountView = Pick<Account, 'id' | 'providerId' | 'proxyMode' | 'proxyBinding'>
 
 export function normalizeProxyMode(mode?: AccountProxyMode): AccountProxyMode {
   return mode === 'auto' ? 'auto' : 'none'
@@ -44,7 +44,6 @@ export function isProxyNodeUsedByProvider(
   return accounts.some((account) =>
     account.id !== exceptAccountId &&
     account.providerId === providerId &&
-    account.status === 'active' &&
     account.proxyMode === 'auto' &&
     account.proxyBinding?.proxyId === proxyId
   )

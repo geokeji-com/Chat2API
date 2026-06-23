@@ -49,7 +49,7 @@ test('proxy mode defaults to direct unless explicitly set to auto', () => {
   assert.equal(normalizeProxyMode('auto'), 'auto')
 })
 
-test('same provider cannot reuse a bound proxy node for another active auto account', () => {
+test('same provider cannot reuse a bound proxy node for another auto account', () => {
   const nodes = [node('p1'), node('p2')]
   const accounts = [
     account('a1', 'deepseek', { proxyMode: 'auto', proxyBinding: { proxyId: 'p1' } }),
@@ -58,6 +58,32 @@ test('same provider cannot reuse a bound proxy node for another active auto acco
 
   assert.equal(isProxyNodeUsedByProvider(accounts, 'p1', 'deepseek', 'a2'), true)
   assert.equal(selectProxyNodeForAccount(nodes, accounts, 'deepseek', 'a2')?.id, 'p2')
+})
+
+test('same provider binding remains reserved even when the bound account is inactive', () => {
+  const nodes = [node('p1'), node('p2')]
+  const accounts = [
+    account('a1', 'deepseek', {
+      status: 'inactive',
+      proxyMode: 'auto',
+      proxyBinding: { proxyId: 'p1' },
+    }),
+    account('a2', 'deepseek', { proxyMode: 'auto' }),
+  ]
+
+  assert.equal(isProxyNodeUsedByProvider(accounts, 'p1', 'deepseek', 'a2'), true)
+  assert.equal(selectProxyNodeForAccount(nodes, accounts, 'deepseek', 'a2')?.id, 'p2')
+})
+
+test('direct accounts do not reserve their previous proxy binding', () => {
+  const nodes = [node('p1')]
+  const accounts = [
+    account('a1', 'deepseek', { proxyMode: 'none', proxyBinding: { proxyId: 'p1' } }),
+    account('a2', 'deepseek', { proxyMode: 'auto' }),
+  ]
+
+  assert.equal(isProxyNodeUsedByProvider(accounts, 'p1', 'deepseek', 'a2'), false)
+  assert.equal(selectProxyNodeForAccount(nodes, accounts, 'deepseek', 'a2')?.id, 'p1')
 })
 
 test('different providers can reuse the same proxy node', () => {

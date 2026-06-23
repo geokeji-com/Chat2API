@@ -25,8 +25,13 @@ export interface ProxyFailureResult {
   account: Account
   proxyNode?: ProxyNode
   switched: boolean
-  fallbackToDirect?: boolean
   error?: string
+}
+
+export interface RequiredProxyAssignment {
+  account: Account
+  proxyNode: ProxyNode
+  error?: never
 }
 
 export interface CreateProxyNodeInput {
@@ -290,16 +295,55 @@ export class ProxyPoolManager {
     }
 
     const proxyNode = this.selectAvailableNode(provider.id, account.id)
-      if (!proxyNode) {
-        const updated = storeManager.updateAccount(account.id, { proxyBinding: undefined })
-        storeManager.addLog('warn', `No available proxy for account ${account.name}; falling back to direct connection`, {
-          accountId: account.id,
-          providerId: provider.id,
-        })
-        return { account: updated || { ...account, proxyBinding: undefined } }
-      }
+    if (!proxyNode) {
+      storeManager.addLog('warn', `No available proxy for account ${account.name}; leaving proxy unassigned`, {
+        accountId: account.id,
+        providerId: provider.id,
+      })
+      return { account }
+    }
 
     const updated = this.bindAccount(account, proxyNode, false)
+    return { account: updated, proxyNode }
+  }
+
+  async ensureRequiredAccountProxyForCity(account: Account, provider: Provider, city?: string): Promise<ProxyAssignment | RequiredProxyAssignment> {
+    const requestedCity = city?.trim()
+    const accountForProxy: Account = normalizeProxyMode(account.proxyMode) === 'auto'
+      ? account
+      : {
+          ...account,
+          proxyMode: 'auto',
+        }
+
+    const currentProxyId = accountForProxy.proxyBinding?.proxyId
+    if (currentProxyId) {
+      const currentNode = storeManager.getProxyNodeById(currentProxyId, true)
+      if (currentNode && this.canUseNode(currentNode) && !this.isNodeUsedByProvider(currentNode.id, provider.id, accountForProxy.id)) {
+        const updated = normalizeProxyMode(account.proxyMode) === 'auto'
+          ? accountForProxy
+          : this.bindAccount(accountForProxy, currentNode, false)
+        return { account: updated, proxyNode: currentNode }
+      }
+    }
+
+    const cityProxyNode = requestedCity
+      ? this.selectAvailableNodeByCity(provider.id, accountForProxy.id, requestedCity)
+      : undefined
+    const proxyNode = cityProxyNode || this.selectAvailableNode(provider.id, accountForProxy.id)
+    if (!proxyNode) {
+      storeManager.addLog('warn', `No required proxy available for account ${account.name}; rejecting model request`, {
+        accountId: account.id,
+        providerId: provider.id,
+        data: { city: requestedCity || undefined },
+      })
+      return {
+        account: accountForProxy,
+        error: 'no_available_proxy',
+      }
+    }
+
+    const updated = this.bindAccount(accountForProxy, proxyNode, false)
     return { account: updated, proxyNode }
   }
 
@@ -313,15 +357,18 @@ export class ProxyPoolManager {
       return { account: { ...account, proxyMode: 'none', proxyBinding: undefined } }
     }
 
+    const currentProxyId = account.proxyBinding?.proxyId
+    if (currentProxyId) {
+      const currentNode = storeManager.getProxyNodeById(currentProxyId, true)
+      if (currentNode && this.canUseNode(currentNode) && !this.isNodeUsedByProvider(currentNode.id, provider.id, account.id)) {
+        return { account, proxyNode: currentNode }
+      }
+    }
+
     const proxyNode = this.selectAvailableNodeByCity(provider.id, account.id, requestedCity)
     if (!proxyNode) {
       console.log(`[ProxyPool] No available proxy node for city "${requestedCity}", falling back to default pool`)
       return this.ensureAccountProxy(account, provider)
-    }
-
-    const currentProxyId = account.proxyBinding?.proxyId
-    if (currentProxyId === proxyNode.id) {
-      return { account, proxyNode }
     }
 
     const updated = this.bindAccount(account, proxyNode, false)
@@ -375,18 +422,16 @@ export class ProxyPoolManager {
 
     const nextProxyNode = this.selectAvailableNode(provider.id, account.id, proxyNode?.id)
     if (!nextProxyNode) {
-      const updated = storeManager.updateAccount(account.id, { proxyBinding: undefined })
-      storeManager.addLog('warn', `Proxy pool exhausted for account ${account.name}; falling back to direct connection`, {
+      storeManager.addLog('warn', `Proxy pool exhausted for account ${account.name}; no proxy switch available`, {
         accountId: account.id,
         providerId: provider.id,
         proxyId: proxyNode?.id,
         data: { error: message },
       })
       return {
-        account: updated || { ...account, proxyBinding: undefined },
-        proxyNode: undefined,
-        switched: true,
-        fallbackToDirect: true,
+        account,
+        proxyNode,
+        switched: false,
         error: message,
       }
     }

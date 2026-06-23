@@ -184,7 +184,7 @@
     "proxyMode": "代理模式",
     "proxyModeNone": "直连",
     "proxyModeAuto": "自动代理",
-    "proxyModeHelp": "自动代理会绑定一个健康的 SOCKS5 节点，并保证同一供应商下的其他活跃账号不会使用同一节点。",
+    "proxyModeHelp": "自动代理会绑定一个健康的 SOCKS5 节点，并保证同一供应商下的其他自动代理账号不会绑定同一节点。",
     "proxySettings": "代理设置",
     "proxySettingsDesc": "控制该账号是否使用 SOCKS5 代理池",
     "proxyBinding": "绑定节点",

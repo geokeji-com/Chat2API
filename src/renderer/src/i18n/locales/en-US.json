@@ -184,7 +184,7 @@
     "proxyMode": "Proxy Mode",
     "proxyModeNone": "Direct",
     "proxyModeAuto": "Auto Proxy",
-    "proxyModeHelp": "Auto proxy assigns a healthy SOCKS5 node that is not used by another active account under the same provider.",
+    "proxyModeHelp": "Auto proxy assigns a healthy SOCKS5 node that is not bound to another auto-proxy account under the same provider.",
     "proxySettings": "Proxy Settings",
     "proxySettingsDesc": "Control whether this account uses the SOCKS5 proxy pool",
     "proxyBinding": "Binding",
