@@ -719,12 +719,12 @@ export class QwenAdapter {
         pageNum,
         ...(cursor ? { cursor } : {}),
       },
-      {
+      applyAxiosProxyConfig({
         headers: this.getApiHeaders(ticket),
         params: this.getApiParams(),
         timeout: 15000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     if (response.status !== 200 || response.data?.success === false) {
@@ -751,7 +751,7 @@ export class QwenAdapter {
     const response = await axios.post(
       `${QWEN_CHAT_SIDE_API_BASE}/api/v2/file/record/delete`,
       { sessionIds },
-      {
+      applyAxiosProxyConfig({
         headers: this.getApiHeaders(ticket),
         params: this.getApiParams({
           nonce: generateNonce(),
@@ -759,7 +759,7 @@ export class QwenAdapter {
         }),
         timeout: 15000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     if (response.status !== 200 || response.data?.success === false) {
@@ -779,12 +779,12 @@ export class QwenAdapter {
     const response = await axios.post(
       `${QWEN_CHAT2_API_BASE}/api/v1/session/delete/batch`,
       { session_ids: sessionIds },
-      {
+      applyAxiosProxyConfig({
         headers: this.getApiHeaders(ticket),
         params: this.getApiParams(),
         timeout: 15000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     if (response.status !== 200) {

@@ -218,11 +218,11 @@ export class GLMAdapter {
       fileData = Buffer.from(this.removeBase64Header(fileUrl), 'base64')
     } else {
       filename = path.basename(fileUrl.split('?')[0])
-      const response = await axios.get(fileUrl, {
+      const response = await axios.get(fileUrl, applyAxiosProxyConfig({
         responseType: 'arraybuffer',
         maxContentLength: FILE_MAX_SIZE,
         timeout: 60000,
-      })
+      }, this.outboundProxy))
       fileData = Buffer.from(response.data)
       mimeType = response.headers['content-type'] || mime.lookup(filename) || 'application/octet-stream'
     }
@@ -237,7 +237,7 @@ export class GLMAdapter {
     const response = await axios.post(
       `${GLM_API_BASE}/backend-api/assistant/file_upload`,
       formData,
-      {
+      applyAxiosProxyConfig({
         headers: {
           Authorization: `Bearer ${token}`,
           Referer: 'https://chatglm.cn/',
@@ -247,7 +247,7 @@ export class GLMAdapter {
         maxBodyLength: FILE_MAX_SIZE,
         timeout: 60000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     if (response.status !== 200 || !response.data?.result) {
@@ -583,7 +583,7 @@ GLM STRICT RULES:
           assistant_id: DEFAULT_ASSISTANT_ID,
           conversation_id: conversationId,
         },
-        {
+        applyAxiosProxyConfig({
           headers: {
             Authorization: `Bearer ${token}`,
             Referer: 'https://chatglm.cn/main/alltoolsdetail',
@@ -596,7 +596,7 @@ GLM STRICT RULES:
           },
           timeout: 15000,
           validateStatus: () => true,
-        }
+        }, this.outboundProxy)
       )
       console.log('[GLM] Conversation deleted:', conversationId)
       return true
@@ -620,7 +620,7 @@ GLM STRICT RULES:
         const listResponse = await axios.post(
           `${GLM_API_BASE}/mainchat-api/conversation/recent_list`,
           { page, page_size: 100 },
-          {
+          applyAxiosProxyConfig({
             headers: {
               Authorization: `Bearer ${token}`,
               Referer: 'https://chatglm.cn/main/alltoolsdetail',
@@ -633,7 +633,7 @@ GLM STRICT RULES:
             },
             timeout: 30000,
             validateStatus: () => true,
-          }
+          }, this.outboundProxy)
         )
 
         console.log('[GLM] Get conversation list page', page, 'response:', JSON.stringify(listResponse.data, null, 2))
@@ -669,7 +669,7 @@ GLM STRICT RULES:
       const deleteResponse = await axios.post(
         `${GLM_API_BASE}/mainchat-api/conversation/bulk_delete`,
         { conversation_ids: allConversationIds },
-        {
+        applyAxiosProxyConfig({
           headers: {
             Authorization: `Bearer ${token}`,
             Referer: 'https://chatglm.cn/main/alltoolsdetail',
@@ -682,7 +682,7 @@ GLM STRICT RULES:
           },
           timeout: 60000,
           validateStatus: () => true,
-        }
+        }, this.outboundProxy)
       )
 
       console.log('[GLM] Bulk delete response:', JSON.stringify(deleteResponse.data, null, 2))

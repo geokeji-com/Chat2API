@@ -163,9 +163,9 @@ export class QwenAiAdapter {
     }
 
     try {
-      const response = await this.axiosInstance.post(url, payload, {
+      const response = await this.axiosInstance.post(url, payload, applyAxiosProxyConfig({
         headers: this.getHeaders(),
-      })
+      }, this.outboundProxy))
 
       console.log('[QwenAI] Create chat response:', JSON.stringify(response.data, null, 2))
 
@@ -185,9 +185,9 @@ export class QwenAiAdapter {
     const url = `${QWEN_AI_BASE}/api/v2/chats/${chatId}`
 
     try {
-      const response = await this.axiosInstance.delete(url, {
+      const response = await this.axiosInstance.delete(url, applyAxiosProxyConfig({
         headers: this.getHeaders(),
-      })
+      }, this.outboundProxy))
 
       if (response.data?.success) {
         console.log('[QwenAI] Deleted chat:', chatId)
@@ -212,9 +212,9 @@ export class QwenAiAdapter {
     try {
       console.log('[QwenAI] Deleting all chats for account')
       
-      const response = await this.axiosInstance.delete(url, {
+      const response = await this.axiosInstance.delete(url, applyAxiosProxyConfig({
         headers: this.getHeaders(),
-      })
+      }, this.outboundProxy))
 
       if (response.data?.success) {
         console.log('[QwenAI] All chats deleted successfully')

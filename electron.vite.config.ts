@@ -18,6 +18,7 @@ export default defineConfig({
           'zstd-codec',
           'electron-store',
           'electron-updater',
+          'socks',
           'socks-proxy-agent',
           'agent-base'
         ]

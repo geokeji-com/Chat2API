@@ -373,11 +373,11 @@ export class MimoAdapter {
         title: '新对话',
         type: 'chat',
       },
-      {
+      applyAxiosProxyConfig({
         headers: this.buildHeaders(serviceToken, userId, phToken),
         timeout: 30000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     const { code, msg, message } = response.data || {}
@@ -400,11 +400,11 @@ export class MimoAdapter {
           conversationId,
           content,
         },
-        {
+        applyAxiosProxyConfig({
           headers: this.buildHeaders(serviceToken, userId, phToken),
           timeout: 30000,
           validateStatus: () => true,
-        }
+        }, this.outboundProxy)
       )
 
       const { code } = response.data || {}
@@ -487,7 +487,7 @@ export class MimoAdapter {
           pageSize,
         },
       },
-      {
+      applyAxiosProxyConfig({
         headers: {
           'Content-Type': 'application/json',
           Cookie: `serviceToken=${serviceToken}; userId=${userId}; xiaomichatbot_ph=${phToken}`,
@@ -496,7 +496,7 @@ export class MimoAdapter {
         },
         timeout: 30000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     console.log('[Mimo] Get conversation list page', pageNum, 'response:', JSON.stringify(response.data, null, 2))
@@ -531,7 +531,7 @@ export class MimoAdapter {
     const response = await axios.post(
       url,
       conversationIds,
-      {
+      applyAxiosProxyConfig({
         headers: {
           'Content-Type': 'application/json',
           Cookie: `serviceToken=${serviceToken}; userId=${userId}; xiaomichatbot_ph=${phToken}`,
@@ -540,7 +540,7 @@ export class MimoAdapter {
         },
         timeout: 60000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     console.log('[Mimo] Delete conversations response:', JSON.stringify(response.data, null, 2))

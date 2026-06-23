@@ -352,7 +352,7 @@ export class DeepSeekAdapter {
 
   async fetchSessionMessageIds(sessionId: string, token?: string): Promise<DeepSeekMessageId[]> {
     const effectiveToken = token || await this.acquireToken()
-    const result = await this.tracedAxios('deepseek.chat.history_messages', {
+    const result = await this.tracedAxios('deepseek.chat.history_messages', applyAxiosProxyConfig({
         method: 'GET',
         url: `${DEEPSEEK_API_BASE}/v0/chat/history_messages?chat_session_id=${encodeURIComponent(sessionId)}`,
         headers: {
@@ -362,7 +362,7 @@ export class DeepSeekAdapter {
         },
         timeout: 15000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     if (result.status !== 200) {
@@ -415,7 +415,7 @@ export class DeepSeekAdapter {
         }
       }
 
-      const result = await this.tracedAxios('deepseek.share.create', {
+      const result = await this.tracedAxios('deepseek.share.create', applyAxiosProxyConfig({
         method: 'POST',
         url: `${DEEPSEEK_API_BASE}/v0/share/create`,
         data: {
@@ -430,7 +430,7 @@ export class DeepSeekAdapter {
         },
         timeout: 15000,
         validateStatus: () => true,
-      })
+      }, this.outboundProxy))
 
       console.log('[DeepSeek] Create share response:', JSON.stringify(result.data, null, 2))
 
@@ -470,7 +470,7 @@ export class DeepSeekAdapter {
   async deleteSession(sessionId: string): Promise<boolean> {
     try {
       const token = await this.acquireToken()
-      const result = await this.tracedAxios('deepseek.chat_session.delete', {
+      const result = await this.tracedAxios('deepseek.chat_session.delete', applyAxiosProxyConfig({
           method: 'POST',
           url: `${DEEPSEEK_API_BASE}/v0/chat_session/delete`,
           data: { chat_session_id: sessionId },
@@ -480,7 +480,7 @@ export class DeepSeekAdapter {
           },
           timeout: 15000,
           validateStatus: () => true,
-        }
+        }, this.outboundProxy)
       )
 
       console.log('[DeepSeek] Delete session response:', JSON.stringify(result.data, null, 2))
@@ -498,7 +498,7 @@ export class DeepSeekAdapter {
 
   private async getChallenge(targetPath: string): Promise<ChallengeResponse> {
     const token = await this.acquireToken()
-    const result = await this.tracedAxios('deepseek.chat.create_pow_challenge', {
+    const result = await this.tracedAxios('deepseek.chat.create_pow_challenge', applyAxiosProxyConfig({
         method: 'POST',
         url: `${DEEPSEEK_API_BASE}/v0/chat/create_pow_challenge`,
         data: { target_path: targetPath },
@@ -508,7 +508,7 @@ export class DeepSeekAdapter {
         },
         timeout: 15000,
         validateStatus: () => true,
-      }
+      }, this.outboundProxy)
     )
 
     // Response structure: { code: 0, data: { biz_code: 0, biz_data: { challenge: {...} } } }
@@ -729,7 +729,7 @@ export class DeepSeekAdapter {
   async deleteAllChats(): Promise<boolean> {
     try {
       const token = await this.acquireToken()
-      const result = await this.tracedAxios('deepseek.chat_session.delete_all', {
+      const result = await this.tracedAxios('deepseek.chat_session.delete_all', applyAxiosProxyConfig({
           method: 'POST',
           url: `${DEEPSEEK_API_BASE}/v0/chat_session/delete_all`,
           data: {},
@@ -739,7 +739,7 @@ export class DeepSeekAdapter {
           },
           timeout: 30000,
           validateStatus: () => true,
-        }
+        }, this.outboundProxy)
       )
 
       console.log('[DeepSeek] Delete all chats response:', JSON.stringify(result.data, null, 2))

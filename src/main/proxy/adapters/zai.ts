@@ -284,7 +284,7 @@ export class ZaiAdapter {
       
       const response = await axios.delete(
         `${ZAI_API_BASE}/api/v1/chats/${chatId}`,
-        {
+        applyAxiosProxyConfig({
           headers: {
             Authorization: `Bearer ${token}`,
             ...FAKE_HEADERS,
@@ -292,7 +292,7 @@ export class ZaiAdapter {
           },
           timeout: 15000,
           validateStatus: () => true,
-        }
+        }, this.outboundProxy)
       )
 
       console.log('[Z.ai] Chat deleted:', chatId, 'Status:', response.status)
@@ -311,7 +311,7 @@ export class ZaiAdapter {
       
       const response = await axios.delete(
         `${ZAI_API_BASE}/api/v1/chats/`,
-        {
+        applyAxiosProxyConfig({
           headers: {
             Authorization: `Bearer ${token}`,
             ...FAKE_HEADERS,
@@ -319,7 +319,7 @@ export class ZaiAdapter {
           },
           timeout: 30000,
           validateStatus: () => true,
-        }
+        }, this.outboundProxy)
       )
 
       console.log('[Z.ai] Delete all chats response:', response.status, response.data)
