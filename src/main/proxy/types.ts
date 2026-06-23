@@ -237,6 +237,8 @@ export interface ProxyContext {
   actualModel?: string
   proxyId?: string
   proxyName?: string
+  proxyHost?: string
+  proxyPort?: number
   startTime: number
   isStream: boolean
   clientIP?: string
@@ -258,6 +260,8 @@ export interface ForwardResult {
   parentMessageId?: string
   proxyId?: string
   proxyName?: string
+  proxyHost?: string
+  proxyPort?: number
   failureType?: 'provider' | 'proxy' | 'network' | 'unknown'
 }
 

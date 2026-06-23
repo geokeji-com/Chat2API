@@ -11,6 +11,7 @@ import { streamHandler } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { storeManager } from '../../store/store'
+import { attachProxyRouteInfo, buildProxyRouteInfo, setProxyRouteHeaders } from '../proxyRouteInfo'
 
 const router = new Router({ prefix: '/v1' })
 
@@ -151,6 +152,7 @@ router.post('/completions', async (ctx: Context) => {
 
     if (!result.success) {
       proxyStatusManager.recordRequestFailure(latency)
+      setProxyRouteHeaders(ctx, buildProxyRouteInfo(result))
 
       ctx.status = result.status || 500
       ctx.body = {
@@ -163,6 +165,8 @@ router.post('/completions', async (ctx: Context) => {
     }
 
     proxyStatusManager.recordRequestSuccess(latency)
+    const proxyRouteInfo = buildProxyRouteInfo(result)
+    setProxyRouteHeaders(ctx, proxyRouteInfo)
 
     storeManager.updateAccount(account.id, {
       lastUsed: Date.now(),
@@ -191,7 +195,7 @@ router.post('/completions', async (ctx: Context) => {
       ctx.body = transformStream
     } else {
       ctx.set('Content-Type', 'application/json')
-      ctx.body = result.body
+      ctx.body = attachProxyRouteInfo(result.body, proxyRouteInfo)
     }
   } catch (error) {
     const latency = Date.now() - startTime

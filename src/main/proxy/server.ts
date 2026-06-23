@@ -12,6 +12,7 @@ import managementRoutes from './routes/management'
 import { proxyStatusManager } from './status'
 import { storeManager } from '../store/store'
 import { sessionManager } from './sessionManager'
+import { PROXY_ROUTE_HEADER_NAMES } from './proxyRouteInfo'
 
 const SLOW_REQUEST_THRESHOLD_MS = 1500
 
@@ -42,6 +43,7 @@ export class ProxyServer {
       ctx.set('Access-Control-Allow-Origin', '*')
       ctx.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
       ctx.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
+      ctx.set('Access-Control-Expose-Headers', PROXY_ROUTE_HEADER_NAMES.join(', '))
       ctx.set('Access-Control-Max-Age', '86400')
 
       if (ctx.method === 'OPTIONS') {

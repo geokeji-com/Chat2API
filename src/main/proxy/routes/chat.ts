@@ -15,6 +15,7 @@ import { modelMapper } from '../modelMapper'
 import { storeManager } from '../../store/store'
 import { proxyPoolManager } from '../proxyPool'
 import { createFinalResponseTransform, shouldIncludeFinalResponse } from '../streamFinalResponse'
+import { attachProxyRouteInfo, buildProxyRouteInfo, setProxyRouteHeaders } from '../proxyRouteInfo'
 import { 
   isAnthropicToolFormat,
   transformResponseToAnthropic,
@@ -193,6 +194,7 @@ router.post('/completions', async (ctx: Context) => {
 
     if (!result.success) {
       proxyStatusManager.recordRequestFailure(latency)
+      setProxyRouteHeaders(ctx, buildProxyRouteInfo(result))
 
       if (result.failureType !== 'proxy' && result.status && result.status >= 400 && result.status !== 429) {
         loadBalancer.markAccountFailed(account.id)
@@ -264,6 +266,8 @@ router.post('/completions', async (ctx: Context) => {
     loadBalancer.clearAccountFailure(account.id)
 
     proxyStatusManager.recordRequestSuccess(latency)
+    const proxyRouteInfo = buildProxyRouteInfo(result)
+    setProxyRouteHeaders(ctx, proxyRouteInfo)
 
     storeManager.updateAccount(account.id, {
       lastUsed: Date.now(),
@@ -470,13 +474,13 @@ router.post('/completions', async (ctx: Context) => {
       if (result.body) {
         // Check if we need to transform to Anthropic format
         if (isAnthropicToolFormat(request.tool_format)) {
-          ctx.body = transformResponseToAnthropic(result.body)
+          ctx.body = attachProxyRouteInfo(transformResponseToAnthropic(result.body), proxyRouteInfo)
           console.log('[Chat] Transformed response to Anthropic tool format')
         } else {
-          ctx.body = result.body
+          ctx.body = attachProxyRouteInfo(result.body, proxyRouteInfo)
         }
       } else {
-        ctx.body = {
+        ctx.body = attachProxyRouteInfo({
           id: requestId,
           object: 'chat.completion',
           created: Math.floor(Date.now() / 1000),
@@ -494,7 +498,7 @@ router.post('/completions', async (ctx: Context) => {
             completion_tokens: 0,
             total_tokens: 0,
           },
-        }
+        }, proxyRouteInfo)
       }
     }
   } catch (error) {

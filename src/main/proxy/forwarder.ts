@@ -369,10 +369,8 @@ export class RequestForwarder {
 
     let lastError: string | undefined
     let lastFailureType: ForwardResult['failureType'] | undefined
-    let currentAccount = account
-    let currentProxyNode: ProxyNode | undefined
 
-    const proxyAssignment = await proxyPoolManager.ensureAccountProxyForCity(account, provider, request.proxy_city)
+    const proxyAssignment = await proxyPoolManager.ensureRequiredAccountProxyForCity(account, provider, request.proxy_city)
     if (proxyAssignment.error) {
       return {
         success: false,
@@ -382,8 +380,25 @@ export class RequestForwarder {
         failureType: 'proxy',
       }
     }
-    currentAccount = proxyAssignment.account
-    currentProxyNode = proxyAssignment.proxyNode
+    if (!proxyAssignment.proxyNode) {
+      return {
+        success: false,
+        status: 503,
+        error: 'no_available_proxy',
+        latency: Date.now() - startTime,
+        failureType: 'proxy',
+      }
+    }
+    const currentAccount = proxyAssignment.account
+    const currentProxyNode = proxyAssignment.proxyNode
+    const proxyContext = {
+      ...context,
+      accountId: currentAccount.id,
+      proxyId: currentProxyNode.id,
+      proxyName: currentProxyNode.name,
+      proxyHost: currentProxyNode.host,
+      proxyPort: currentProxyNode.port,
+    }
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (attempt > 0) {
@@ -391,12 +406,6 @@ export class RequestForwarder {
       }
 
       let modifiedRequest = request
-      const proxyContext = {
-        ...context,
-        accountId: currentAccount.id,
-        proxyId: currentProxyNode?.id,
-        proxyName: currentProxyNode?.name,
-      }
 
       if (config.contextManagement?.enabled && modifiedRequest.messages && modifiedRequest.messages.length > 0) {
         try {
@@ -451,40 +460,15 @@ export class RequestForwarder {
         const result = await this.doForward(modifiedRequest, currentAccount, provider, actualModel, proxyContext)
 
         if (result.success) {
-          if (currentProxyNode) {
-            proxyPoolManager.markNodeSuccess(currentProxyNode.id)
-          }
+          proxyPoolManager.markNodeSuccess(currentProxyNode.id)
           return result
         }
 
         lastError = result.error
         lastFailureType = result.failureType
 
-        if (result.failureType === 'proxy' && currentProxyNode) {
-          const switchResult = proxyPoolManager.handleProxyFailure(
-            currentAccount,
-            provider,
-            currentProxyNode,
-            result.error || 'Proxy transport failed',
-          )
-          currentAccount = switchResult.account
-          currentProxyNode = switchResult.proxyNode
-          if (switchResult.switched) {
-            lastError = switchResult.error
-            if (switchResult.fallbackToDirect && attempt >= maxRetries) {
-              const directResult = await this.doForward(modifiedRequest, currentAccount, provider, actualModel, {
-                ...context,
-                accountId: currentAccount.id,
-              })
-              if (directResult.success) {
-                return directResult
-              }
-              lastError = directResult.error
-              lastFailureType = directResult.failureType
-              break
-            }
-            continue
-          }
+        if (result.failureType === 'proxy') {
+          proxyPoolManager.markNodeFailed(currentProxyNode.id, result.error || 'Proxy transport failed')
           break
         }
 
@@ -493,26 +477,9 @@ export class RequestForwarder {
         }
       } catch (error) {
         lastError = error instanceof Error ? error.message : 'Unknown error'
-        lastFailureType = currentProxyNode && isLikelyProxyTransportError(error) ? 'proxy' : 'unknown'
-        if (currentProxyNode && isLikelyProxyTransportError(error)) {
-          const switchResult = proxyPoolManager.handleProxyFailure(currentAccount, provider, currentProxyNode, error)
-          currentAccount = switchResult.account
-          currentProxyNode = switchResult.proxyNode
-          if (switchResult.switched) {
-            if (switchResult.fallbackToDirect && attempt >= maxRetries) {
-              const directResult = await this.doForward(modifiedRequest, currentAccount, provider, actualModel, {
-                ...context,
-                accountId: currentAccount.id,
-              })
-              if (directResult.success) {
-                return directResult
-              }
-              lastError = directResult.error
-              lastFailureType = directResult.failureType
-              break
-            }
-            continue
-          }
+        lastFailureType = isLikelyProxyTransportError(error) ? 'proxy' : 'unknown'
+        if (isLikelyProxyTransportError(error)) {
+          proxyPoolManager.markNodeFailed(currentProxyNode.id, lastError)
           break
         }
       }
@@ -523,8 +490,10 @@ export class RequestForwarder {
       error: lastError || 'Request failed after retries',
       latency: Date.now() - startTime,
       failureType: lastFailureType,
-      proxyId: currentProxyNode?.id,
-      proxyName: currentProxyNode?.name,
+      proxyId: currentProxyNode.id,
+      proxyName: currentProxyNode.name,
+      proxyHost: currentProxyNode.host,
+      proxyPort: currentProxyNode.port,
     }
   }
 
@@ -539,9 +508,19 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     const startTime = Date.now()
-    const outboundProxy = createProxyContext(
-      context.proxyId ? storeManager.getProxyNodeById(context.proxyId, true) : undefined
-    )
+    const proxyNode = context.proxyId
+      ? storeManager.getProxyNodeById(context.proxyId, true)
+      : undefined
+    if (!proxyNode) {
+      return {
+        success: false,
+        status: 503,
+        error: 'no_available_proxy',
+        latency: Date.now() - startTime,
+        failureType: 'proxy',
+      }
+    }
+    const outboundProxy = createProxyContext(proxyNode)
 
     const dedicatedForwarder = this.providerForwarders.find(forwarder => forwarder.matches(provider))
     if (dedicatedForwarder) {
@@ -551,6 +530,8 @@ export class RequestForwarder {
             ...result,
             proxyId: outboundProxy.node.id,
             proxyName: outboundProxy.node.name,
+            proxyHost: outboundProxy.node.host,
+            proxyPort: outboundProxy.node.port,
           }
         : result
     }
@@ -593,6 +574,8 @@ export class RequestForwarder {
         latency,
         proxyId: outboundProxy?.node.id,
         proxyName: outboundProxy?.node.name,
+        proxyHost: outboundProxy?.node.host,
+        proxyPort: outboundProxy?.node.port,
       }
       }
 
@@ -604,6 +587,8 @@ export class RequestForwarder {
         latency,
         proxyId: outboundProxy?.node.id,
         proxyName: outboundProxy?.node.name,
+        proxyHost: outboundProxy?.node.host,
+        proxyPort: outboundProxy?.node.port,
       }
     } catch (error) {
       const latency = Date.now() - startTime
