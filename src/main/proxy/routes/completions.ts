@@ -11,7 +11,14 @@ import { streamHandler } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { storeManager } from '../../store/store'
-import { attachProxyRouteInfo, buildProxyRouteInfo, setProxyRouteHeaders } from '../proxyRouteInfo'
+import {
+  attachAccountRouteInfo,
+  attachProxyRouteInfo,
+  buildAccountRouteInfo,
+  buildProxyRouteInfo,
+  setAccountRouteHeaders,
+  setProxyRouteHeaders,
+} from '../proxyRouteInfo'
 
 const router = new Router({ prefix: '/v1' })
 
@@ -117,6 +124,7 @@ router.post('/completions', async (ctx: Context) => {
   }
 
   const { account, provider, actualModel } = selection
+  const accountRouteInfo = buildAccountRouteInfo(account, provider)
 
   const chatRequest = {
     model: actualModel,
@@ -152,21 +160,24 @@ router.post('/completions', async (ctx: Context) => {
 
     if (!result.success) {
       proxyStatusManager.recordRequestFailure(latency)
-      setProxyRouteHeaders(ctx, buildProxyRouteInfo(result))
+      const proxyRouteInfo = buildProxyRouteInfo(result)
+      setProxyRouteHeaders(ctx, proxyRouteInfo)
+      setAccountRouteHeaders(ctx, accountRouteInfo)
 
       ctx.status = result.status || 500
-      ctx.body = {
+      ctx.body = attachAccountRouteInfo(attachProxyRouteInfo({
         error: {
           message: result.error || 'Request failed',
           type: 'api_error',
         },
-      }
+      }, proxyRouteInfo), accountRouteInfo)
       return
     }
 
     proxyStatusManager.recordRequestSuccess(latency)
     const proxyRouteInfo = buildProxyRouteInfo(result)
     setProxyRouteHeaders(ctx, proxyRouteInfo)
+    setAccountRouteHeaders(ctx, accountRouteInfo)
 
     storeManager.updateAccount(account.id, {
       lastUsed: Date.now(),
@@ -195,19 +206,23 @@ router.post('/completions', async (ctx: Context) => {
       ctx.body = transformStream
     } else {
       ctx.set('Content-Type', 'application/json')
-      ctx.body = attachProxyRouteInfo(result.body, proxyRouteInfo)
+      ctx.body = attachAccountRouteInfo(
+        attachProxyRouteInfo(result.body, proxyRouteInfo),
+        accountRouteInfo
+      )
     }
   } catch (error) {
     const latency = Date.now() - startTime
     proxyStatusManager.recordRequestFailure(latency)
 
+    setAccountRouteHeaders(ctx, accountRouteInfo)
     ctx.status = 500
-    ctx.body = {
+    ctx.body = attachAccountRouteInfo({
       error: {
         message: error instanceof Error ? error.message : 'Unknown error',
         type: 'internal_error',
       },
-    }
+    }, accountRouteInfo)
   }
 })
 

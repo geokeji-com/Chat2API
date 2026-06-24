@@ -13,9 +13,15 @@ import { streamHandler } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { storeManager } from '../../store/store'
-import { proxyPoolManager } from '../proxyPool'
 import { createFinalResponseTransform, shouldIncludeFinalResponse } from '../streamFinalResponse'
-import { attachProxyRouteInfo, buildProxyRouteInfo, setProxyRouteHeaders } from '../proxyRouteInfo'
+import {
+  attachAccountRouteInfo,
+  attachProxyRouteInfo,
+  buildAccountRouteInfo,
+  buildProxyRouteInfo,
+  setAccountRouteHeaders,
+  setProxyRouteHeaders,
+} from '../proxyRouteInfo'
 import { 
   isAnthropicToolFormat,
   transformResponseToAnthropic,
@@ -178,6 +184,7 @@ router.post('/completions', async (ctx: Context) => {
     isStream: request.stream || false,
     clientIP,
   }
+  const accountRouteInfo = buildAccountRouteInfo(account, provider)
 
   proxyStatusManager.recordRequestStart(request.model, provider.id, account.id)
 
@@ -194,7 +201,9 @@ router.post('/completions', async (ctx: Context) => {
 
     if (!result.success) {
       proxyStatusManager.recordRequestFailure(latency)
-      setProxyRouteHeaders(ctx, buildProxyRouteInfo(result))
+      const proxyRouteInfo = buildProxyRouteInfo(result)
+      setProxyRouteHeaders(ctx, proxyRouteInfo)
+      setAccountRouteHeaders(ctx, accountRouteInfo)
 
       if (result.failureType !== 'proxy' && result.status && result.status >= 400 && result.status !== 429) {
         loadBalancer.markAccountFailed(account.id)
@@ -207,14 +216,14 @@ router.post('/completions', async (ctx: Context) => {
           : null
 
       ctx.status = result.status || 500
-      ctx.body = {
+      ctx.body = attachAccountRouteInfo(attachProxyRouteInfo({
         error: {
           message: result.error || 'Request failed',
           type: 'api_error',
           param: null,
           code: errorCode,
         },
-      }
+      }, proxyRouteInfo), accountRouteInfo)
 
       storeManager.addLog('error', `Request failed: ${result.error}`, {
         requestId,
@@ -268,6 +277,7 @@ router.post('/completions', async (ctx: Context) => {
     proxyStatusManager.recordRequestSuccess(latency)
     const proxyRouteInfo = buildProxyRouteInfo(result)
     setProxyRouteHeaders(ctx, proxyRouteInfo)
+    setAccountRouteHeaders(ctx, accountRouteInfo)
 
     storeManager.updateAccount(account.id, {
       lastUsed: Date.now(),
@@ -386,9 +396,6 @@ router.post('/completions', async (ctx: Context) => {
         streamClosed = true
 
         console.error('[Chat] Stream error:', err.message)
-        if (result.proxyId) {
-          proxyPoolManager.markNodeFailed(result.proxyId, err.message)
-        }
 
         activeOutputStream?.unpipe(wrapperStream)
         const destroyableSource = result.stream as NodeJS.ReadableStream & { destroy?: () => void }
@@ -474,13 +481,19 @@ router.post('/completions', async (ctx: Context) => {
       if (result.body) {
         // Check if we need to transform to Anthropic format
         if (isAnthropicToolFormat(request.tool_format)) {
-          ctx.body = attachProxyRouteInfo(transformResponseToAnthropic(result.body), proxyRouteInfo)
+          ctx.body = attachAccountRouteInfo(
+            attachProxyRouteInfo(transformResponseToAnthropic(result.body), proxyRouteInfo),
+            accountRouteInfo
+          )
           console.log('[Chat] Transformed response to Anthropic tool format')
         } else {
-          ctx.body = attachProxyRouteInfo(result.body, proxyRouteInfo)
+          ctx.body = attachAccountRouteInfo(
+            attachProxyRouteInfo(result.body, proxyRouteInfo),
+            accountRouteInfo
+          )
         }
       } else {
-        ctx.body = attachProxyRouteInfo({
+        ctx.body = attachAccountRouteInfo(attachProxyRouteInfo({
           id: requestId,
           object: 'chat.completion',
           created: Math.floor(Date.now() / 1000),
@@ -498,7 +511,7 @@ router.post('/completions', async (ctx: Context) => {
             completion_tokens: 0,
             total_tokens: 0,
           },
-        }, proxyRouteInfo)
+        }, proxyRouteInfo), accountRouteInfo)
       }
     }
   } catch (error) {
@@ -508,15 +521,16 @@ router.post('/completions', async (ctx: Context) => {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     const errorStack = error instanceof Error ? error.stack : undefined
 
+    setAccountRouteHeaders(ctx, accountRouteInfo)
     ctx.status = 500
-    ctx.body = {
+    ctx.body = attachAccountRouteInfo({
       error: {
         message: errorMessage,
         type: 'internal_error',
         param: null,
         code: null,
       },
-    }
+    }, accountRouteInfo)
 
     storeManager.addLog('error', `Request exception: ${errorMessage}`, {
       requestId,
