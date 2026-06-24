@@ -35,13 +35,15 @@ import {
   Coins,
   Network
 } from 'lucide-react'
-import type { Account, AccountStatus, DeepSeekPostShareFollowUpConfig, Provider } from '@/types/electron'
+import type { Account, AccountStatus, DeepSeekPostShareFollowUpConfig, Provider, ProxyNode } from '@/types/electron'
 import { cn } from '@/lib/utils'
+import { formatAccountProxyBinding } from '@/lib/proxyBinding'
 import { DeepSeekAccountFollowUpCard } from './DeepSeekFollowUpConfig'
 
 interface AccountDetailProps {
   account: Account
   provider: Provider | undefined
+  proxyNodes: ProxyNode[]
   onBack: () => void
   onEdit: () => void
   onDelete: () => void
@@ -53,6 +55,7 @@ interface AccountDetailProps {
 export function AccountDetail({
   account,
   provider,
+  proxyNodes,
   onBack,
   onEdit,
   onDelete,
@@ -123,6 +126,10 @@ export function AccountDetail({
 
   const config = statusConfig[account.status]
   const StatusIcon = config.icon
+  const proxyBindingLabel = formatAccountProxyBinding(account, proxyNodes, {
+    direct: t('providers.proxyDirect'),
+    pending: t('providers.proxyBindingPending'),
+  })
 
   const formatDate = (timestamp?: number) => {
     if (!timestamp) return '-'
@@ -347,9 +354,7 @@ export function AccountDetail({
               <div className="flex items-center justify-between gap-4">
                 <span className="text-sm text-muted-foreground">{t('providers.proxyBinding')}</span>
                 <span className="text-sm text-right">
-                  {account.proxyMode === 'auto'
-                    ? account.proxyBinding?.proxyId || t('providers.proxyBindingPending')
-                    : t('providers.proxyDirect')}
+                  {proxyBindingLabel}
                 </span>
               </div>
               {account.proxyMode === 'auto' && (

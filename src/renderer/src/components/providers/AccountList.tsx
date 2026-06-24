@@ -40,8 +40,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import type { Account, AccountStatus } from '@/types/electron'
+import type { Account, AccountStatus, ProxyNode } from '@/types/electron'
 import { cn } from '@/lib/utils'
+import { formatAccountProxyBinding } from '@/lib/proxyBinding'
 import {
   DeepSeekFollowUpBatchDialog,
   DeepSeekFollowUpStatusBadge,
@@ -51,6 +52,7 @@ import type { DeepSeekPostShareFollowUpConfig } from '@/types/electron'
 interface AccountListProps {
   accounts: Account[]
   providerId: string
+  proxyNodes: ProxyNode[]
   onAddAccount: () => void
   onEditAccount: (account: Account) => void
   onDeleteAccount: (id: string) => void
@@ -63,6 +65,7 @@ interface AccountListProps {
 export function AccountList({
   accounts,
   providerId,
+  proxyNodes,
   onAddAccount,
   onEditAccount,
   onDeleteAccount,
@@ -151,6 +154,10 @@ export function AccountList({
   const activeCount = accounts.filter(a => a.status === 'active').length
   const totalCount = accounts.length
   const isDeepSeekProvider = providerId === 'deepseek'
+  const proxyBindingLabels = {
+    direct: t('providers.proxyDirect'),
+    pending: t('providers.proxyBindingPending'),
+  }
 
   const formatDate = (timestamp?: number) => {
     if (!timestamp) return '-'
@@ -216,6 +223,7 @@ export function AccountList({
             const config = statusConfig[account.status]
             const StatusIcon = config.icon
             const isValidating = validatingIds.has(account.id)
+            const proxyBindingLabel = formatAccountProxyBinding(account, proxyNodes, proxyBindingLabels)
 
             return (
               <Card 
@@ -261,8 +269,8 @@ export function AccountList({
                           <span>{t('dashboard.totalRequests')}: {account.requestCount || 0}</span>
                           <span>{t('providers.usedToday')}: {formatUsage(account)}</span>
                           {account.proxyMode === 'auto' && (
-                            <span>
-                              {t('providers.proxyBinding')}: {account.proxyBinding?.proxyId?.slice(0, 8) || t('providers.proxyBindingPending')}
+                            <span className="truncate" title={proxyBindingLabel}>
+                              {t('providers.proxyBinding')}: {proxyBindingLabel}
                             </span>
                           )}
                         </div>

@@ -24,6 +24,7 @@ import type {
   CustomProviderFormData,
   Account,
   AppConfig,
+  ProxyNode,
 } from '@/types/electron'
 import { FilterType, StatusFilter } from '@/components/providers/ProviderFilter'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -50,9 +51,48 @@ export function Providers() {
   const [showAddAccountDialog, setShowAddAccountDialog] = useState(false)
   const [editingAccount, setEditingAccount] = useState<Account | null>(null)
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null)
+  const [proxyNodes, setProxyNodes] = useState<ProxyNode[]>([])
   
   const [showModelEditor, setShowModelEditor] = useState(false)
   const [modelEditorProvider, setModelEditorProvider] = useState<{ id: string; name: string } | null>(null)
+
+  const syncAccountCounts = (accountsData: Account[], providersData = useProvidersStore.getState().providers) => {
+    const countMap: Record<string, { total: number; active: number }> = {}
+
+    for (const provider of providersData) {
+      const providerAccounts = accountsData.filter(a => a.providerId === provider.id)
+      countMap[provider.id] = {
+        total: providerAccounts.length,
+        active: providerAccounts.filter(a => a.status === 'active').length,
+      }
+    }
+
+    useProvidersStore.getState().setAccountCounts(countMap)
+  }
+
+  const refreshAccounts = async () => {
+    if (!window.electronAPI?.accounts?.getAll) return []
+
+    const accountsData = await window.electronAPI.accounts.getAll()
+    useProvidersStore.getState().setAccounts(accountsData)
+    syncAccountCounts(accountsData)
+    return accountsData
+  }
+
+  const refreshProxyNodes = async () => {
+    if (!window.electronAPI?.proxyPool?.getAll) return []
+
+    const nodes = await window.electronAPI.proxyPool.getAll()
+    setProxyNodes(nodes)
+    return nodes
+  }
+
+  const refreshAccountManagementSnapshot = async () => {
+    await Promise.all([
+      refreshAccounts(),
+      refreshProxyNodes(),
+    ])
+  }
   
   useEffect(() => {
     if (hasLoadedRef.current) return
@@ -70,21 +110,22 @@ export function Providers() {
       
       try {
         useProvidersStore.getState().setIsLoading(true)
-        const [providersData, builtinData, accountsData, configData] = await Promise.all([
+        const [providersData, builtinData, accountsData, configData, proxyNodesData] = await Promise.all([
           window.electronAPI.providers.getAll(),
           window.electronAPI.providers.getBuiltin(),
           window.electronAPI.accounts.getAll(),
           window.electronAPI.config.get(),
+          window.electronAPI.proxyPool?.getAll?.() || Promise.resolve([]),
         ])
         
         useProvidersStore.getState().setProviders(providersData)
         useProvidersStore.getState().setBuiltinProviders(builtinData)
         useProvidersStore.getState().setAccounts(accountsData)
         setAppConfig(configData)
+        setProxyNodes(proxyNodesData)
         
         const existingStatuses = useProvidersStore.getState().providerStatuses
         const statusMap: Record<string, ProviderStatus> = { ...existingStatuses }
-        const countMap: Record<string, { total: number; active: number }> = {}
         
         for (const provider of providersData) {
           if (provider.status) {
@@ -92,15 +133,10 @@ export function Providers() {
           } else if (!statusMap[provider.id]) {
             statusMap[provider.id] = 'unknown'
           }
-          const providerAccounts = accountsData.filter(a => a.providerId === provider.id)
-          countMap[provider.id] = {
-            total: providerAccounts.length,
-            active: providerAccounts.filter(a => a.status === 'active').length,
-          }
         }
         
         useProvidersStore.getState().setProviderStatuses(statusMap)
-        useProvidersStore.getState().setAccountCounts(countMap)
+        syncAccountCounts(accountsData, providersData)
       } catch (error) {
         console.error('Failed to load providers:', error)
       } finally {
@@ -115,6 +151,11 @@ export function Providers() {
     if (!window.electronAPI?.config?.onConfigChanged) return
     return window.electronAPI.config.onConfigChanged(setAppConfig)
   }, [])
+
+  useEffect(() => {
+    if (viewMode !== 'accounts' && viewMode !== 'account-detail') return
+    void refreshAccountManagementSnapshot()
+  }, [viewMode, store.selectedProviderId, store.selectedAccountId])
 
   const filteredProviders = store.providers.filter((provider) => {
     const matchesSearch = 
@@ -588,8 +629,17 @@ export function Providers() {
   }
 
   const handleViewAccountDetail = (account: Account) => {
-    store.setSelectedAccountId(account.id)
-    setViewMode('account-detail')
+    const openDetail = async () => {
+      const latestAccount = await window.electronAPI.accounts.getById(account.id)
+      if (latestAccount) {
+        store.updateAccount(account.id, latestAccount)
+      }
+      await refreshProxyNodes()
+      store.setSelectedAccountId(account.id)
+      setViewMode('account-detail')
+    }
+
+    void openDetail()
   }
 
   const handleBackToProviders = () => {
@@ -637,6 +687,7 @@ export function Providers() {
         <AccountDetail
           account={selectedAccount}
           provider={selectedProvider}
+          proxyNodes={proxyNodes}
           onBack={handleBackToAccounts}
           onEdit={async () => {
             const fullAccount = await window.electronAPI.accounts.getById(selectedAccount.id, true)
@@ -678,6 +729,7 @@ export function Providers() {
         <AccountList
           accounts={providerAccounts}
           providerId={selectedProvider.id}
+          proxyNodes={proxyNodes}
           onAddAccount={() => setShowAddAccountDialog(true)}
           onEditAccount={async (account) => {
             const fullAccount = await window.electronAPI.accounts.getById(account.id, true)
