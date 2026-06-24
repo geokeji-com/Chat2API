@@ -173,21 +173,12 @@ class StoreManager {
 
   /**
    * Get Encryption Key
-   * Returns a fixed encryption key for electron-store
-   * Note: electron-store uses this key to encrypt/decrypt the data file,
-   * so it must be stable across app restarts
+   * Returns the fixed key used by electron-store to encrypt/decrypt data.json.
+   * This must not depend on safeStorage availability; otherwise packaged builds
+   * can fail to read the same data file and recover it as corrupted.
    */
-  private getEncryptionKey(): string | undefined {
-    try {
-      if (safeStorage.isEncryptionAvailable()) {
-        // Use a fixed key - electron-store will use this to encrypt/decrypt data
-        // The key itself is not stored in the data file, only used for encryption
-        return 'chat2api-fixed-encryption-key-v1'
-      }
-    } catch (error) {
-      console.warn('Encryption unavailable, using unencrypted storage:', error)
-    }
-    return undefined
+  private getEncryptionKey(): string {
+    return 'chat2api-fixed-encryption-key-v1'
   }
 
   /**
