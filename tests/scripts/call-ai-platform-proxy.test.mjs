@@ -96,3 +96,111 @@ print(json.dumps({
     missing: null,
   })
 })
+
+test('call_ai_platform extracts account info from non-stream response body', () => {
+  const result = runPythonHarness(`
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("call_ai_platform", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+response = {
+    "chat2api": {
+        "account": {
+            "id": "account-1",
+            "name": "采集账号 A",
+            "providerId": "deepseek",
+            "providerName": "DeepSeek",
+        }
+    }
+}
+print(json.dumps(module.extract_account_info(response), ensure_ascii=False))
+`)
+
+  assert.deepEqual(result, {
+    id: 'account-1',
+    name: '采集账号 A',
+    providerId: 'deepseek',
+    providerName: 'DeepSeek',
+  })
+})
+
+test('call_ai_platform extracts account info from stream response headers', () => {
+  const result = runPythonHarness(`
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("call_ai_platform", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+route = module.extract_account_route_from_headers({
+    "X-Chat2API-Account-Id": "account-1",
+    "X-Chat2API-Account-Name": "%E9%87%87%E9%9B%86%E8%B4%A6%E5%8F%B7%20A",
+    "X-Chat2API-Provider-Id": "deepseek",
+    "X-Chat2API-Provider-Name": "DeepSeek",
+})
+print(json.dumps(module.extract_account_info({module.INTERNAL_ACCOUNT_ROUTE_KEY: route}), ensure_ascii=False))
+`)
+
+  assert.deepEqual(result, {
+    id: 'account-1',
+    name: '采集账号 A',
+    providerId: 'deepseek',
+    providerName: 'DeepSeek',
+  })
+})
+
+test('call_ai_platform keeps account info on HTTP error payloads', () => {
+  const result = runPythonHarness(`
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("call_ai_platform", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+response = {
+    "error": {
+        "message": "rate limited",
+        "code": "rate_limit",
+        "type": "api_error",
+    },
+    module.INTERNAL_HTTP_ERROR_KEY: {
+        "status": 429,
+        "url": "http://127.0.0.1:8080/v1/chat/completions",
+        "body": "{\\"error\\":{\\"message\\":\\"rate limited\\"}}",
+    },
+    module.INTERNAL_ACCOUNT_ROUTE_KEY: {
+        "id": "account-1",
+        "name": "采集账号 A",
+        "providerId": "deepseek",
+        "providerName": "DeepSeek",
+    },
+}
+print(json.dumps({
+    "account": module.extract_account_info(response),
+    "error": module.build_error_payload(response),
+}, ensure_ascii=False))
+`)
+
+  assert.deepEqual(result, {
+    account: {
+      id: 'account-1',
+      name: '采集账号 A',
+      providerId: 'deepseek',
+      providerName: 'DeepSeek',
+    },
+    error: {
+      status: 429,
+      message: 'rate limited',
+      code: 'rate_limit',
+      type: 'api_error',
+    },
+  })
+})

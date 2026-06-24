@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from typing import Any
@@ -42,7 +43,15 @@ PROXY_HEADER_NAMES = {
     "port": "X-Chat2API-Proxy-Port",
     "address": "X-Chat2API-Proxy-Address",
 }
+ACCOUNT_HEADER_NAMES = {
+    "id": "X-Chat2API-Account-Id",
+    "name": "X-Chat2API-Account-Name",
+    "providerId": "X-Chat2API-Provider-Id",
+    "providerName": "X-Chat2API-Provider-Name",
+}
 INTERNAL_PROXY_ROUTE_KEY = "__chat2api_proxy_route"
+INTERNAL_ACCOUNT_ROUTE_KEY = "__chat2api_account_route"
+INTERNAL_HTTP_ERROR_KEY = "__chat2api_http_error"
 
 
 PLATFORMS: dict[str, dict[str, Any]] = {
@@ -331,15 +340,30 @@ def post_chat_completion(url: str, payload: dict[str, Any], api_key: str | None,
         with urllib.request.urlopen(request, timeout=timeout) as response:
             content_type = response.headers.get("Content-Type", "")
             proxy_route = extract_proxy_route_from_headers(response.headers)
+            account_route = extract_account_route_from_headers(response.headers)
             if "text/event-stream" in content_type:
                 data = read_sse_final_response(response, debug_raw)
                 if proxy_route:
                     data[INTERNAL_PROXY_ROUTE_KEY] = proxy_route
+                if account_route:
+                    data[INTERNAL_ACCOUNT_ROUTE_KEY] = account_route
                 return data
             text = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"HTTP {exc.code} from {url}: {error_body}") from exc
+        error_data = parse_error_response_body(error_body)
+        proxy_route = extract_proxy_route_from_headers(exc.headers)
+        account_route = extract_account_route_from_headers(exc.headers)
+        if proxy_route:
+            error_data[INTERNAL_PROXY_ROUTE_KEY] = proxy_route
+        if account_route:
+            error_data[INTERNAL_ACCOUNT_ROUTE_KEY] = account_route
+        error_data[INTERNAL_HTTP_ERROR_KEY] = {
+            "status": exc.code,
+            "url": url,
+            "body": error_body,
+        }
+        return error_data
     except urllib.error.URLError as exc:
         raise SystemExit(f"Failed to connect to {url}: {exc.reason}") from exc
 
@@ -356,7 +380,17 @@ def post_chat_completion(url: str, payload: dict[str, Any], api_key: str | None,
         }
     if proxy_route:
         data[INTERNAL_PROXY_ROUTE_KEY] = proxy_route
+    if account_route:
+        data[INTERNAL_ACCOUNT_ROUTE_KEY] = account_route
     return data
+
+
+def parse_error_response_body(text: str) -> dict[str, Any]:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return {"error": {"message": text}}
+    return data if isinstance(data, dict) else {"error": data}
 
 
 def read_sse_final_response(response: Any, debug_raw: bool = False) -> dict[str, Any]:
@@ -666,6 +700,15 @@ def extract_proxy_route_from_headers(headers: Any) -> dict[str, Any] | None:
     return route or None
 
 
+def extract_account_route_from_headers(headers: Any) -> dict[str, Any] | None:
+    account: dict[str, Any] = {}
+    for key, header_name in ACCOUNT_HEADER_NAMES.items():
+        value = headers.get(header_name) if headers is not None else None
+        if value not in (None, ""):
+            account[key] = urllib.parse.unquote(str(value))
+    return account or None
+
+
 def normalize_proxy_info(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -692,6 +735,32 @@ def extract_proxy_info(response: dict[str, Any]) -> dict[str, Any] | None:
     return (
         normalize_proxy_info(chat2api.get("proxy"))
         or normalize_proxy_info(response.get(INTERNAL_PROXY_ROUTE_KEY))
+    )
+
+
+def normalize_account_info(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+
+    account_id = clean_text(first_non_empty(value.get("id"), value.get("accountId"), value.get("account_id")))
+    provider_id = clean_text(first_non_empty(value.get("providerId"), value.get("provider_id")))
+    if not account_id:
+        return None
+
+    return {
+        "id": account_id,
+        "name": clean_text(first_non_empty(value.get("name"), value.get("accountName"), value.get("account_name"))),
+        "providerId": provider_id,
+        "providerName": clean_text(first_non_empty(value.get("providerName"), value.get("provider_name"))),
+    }
+
+
+def extract_account_info(response: dict[str, Any]) -> dict[str, Any] | None:
+    message = extract_message(response)
+    chat2api = extract_chat2api(response, message)
+    return (
+        normalize_account_info(chat2api.get("account"))
+        or normalize_account_info(response.get(INTERNAL_ACCOUNT_ROUTE_KEY))
     )
 
 
@@ -997,6 +1066,34 @@ def append_debug_log_event(path: str, event: str, data: dict[str, Any]) -> tuple
     return absolute_path, os.path.getsize(absolute_path)
 
 
+def build_error_payload(response: dict[str, Any]) -> dict[str, Any]:
+    http_error = response.get(INTERNAL_HTTP_ERROR_KEY)
+    error_value = response.get("error")
+    message = ""
+    code = None
+    error_type = None
+
+    if isinstance(error_value, dict):
+        message = clean_text(error_value.get("message"))
+        code = error_value.get("code")
+        error_type = error_value.get("type")
+    elif error_value is not None:
+        message = clean_text(error_value)
+
+    status = None
+    if isinstance(http_error, dict):
+        status = http_error.get("status")
+        if not message:
+            message = clean_text(http_error.get("body"))
+
+    return {
+        "status": status,
+        "message": message or "Chat2API request failed",
+        "code": code,
+        "type": error_type,
+    }
+
+
 def raw_event_count(debug_data: Any, key: str) -> int:
     if not isinstance(debug_data, dict):
         return 0
@@ -1055,8 +1152,59 @@ def main() -> int:
         })
     response = post_chat_completion(chat_endpoint(args.base_url), payload, args.api_key, args.timeout, debug_raw)
     proxy_info = extract_proxy_info(response)
+    account_info = extract_account_info(response)
+    create_time = args.create_time or task.get("createTime") or now_string()
+
+    if response.get(INTERNAL_HTTP_ERROR_KEY):
+        result: dict[str, Any] = {
+            "mainTaskId": main_task_id,
+            "platform": platform_config["label"],
+            "platformId": platform_id,
+            "enterpriseId": args.enterprise_id or task.get("enterpriseId") or "",
+            "createTime": create_time,
+            "query": str(query),
+            "city": city,
+            "proxyCity": proxy_city,
+            "cityStatus": city_status,
+            "model": model,
+            "proxy": proxy_info,
+            "account": account_info,
+            "answer": "",
+            "reasoningContent": "",
+            "searchQueries": [],
+            "relatedSearches": [],
+            "citations": [],
+            "videos": [],
+            "shareUrl": "",
+            "shareId": "",
+            "conversationUrl": "",
+            "sessionId": "",
+            "userSnapshot": None,
+            "proxySnapshot": None,
+            "success": False,
+            "error": build_error_payload(response),
+        }
+        if debug_raw:
+            append_debug_log_event(debug_log_file, "script.result", {
+                "mainTaskId": main_task_id,
+                "platform": platform_config["label"],
+                "platformId": platform_id,
+                "createTime": create_time,
+                "query": str(query),
+                "response": {
+                    "structured": result,
+                    "raw": response,
+                },
+            })
+        if args.raw:
+            result["raw"] = response
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 1
+
     if not proxy_info:
         raise SystemExit("Missing proxy information in Chat2API response")
+    if not account_info:
+        raise SystemExit("Missing account information in Chat2API response")
 
     structured = extract_structured_fields(response)
     if platform_id in ("kimi", "qwen"):
@@ -1065,7 +1213,6 @@ def main() -> int:
     # 从服务端写入的 debug trace 事件中提取用户快照和 proxy 快照
     user_snapshot, proxy_snapshot = extract_snapshots_from_debug_log(debug_log_file) if debug_raw else ({}, None)
 
-    create_time = args.create_time or task.get("createTime") or now_string()
     result: dict[str, Any] = {
         "mainTaskId": main_task_id,
         "platform": platform_config["label"],
@@ -1078,6 +1225,7 @@ def main() -> int:
         "cityStatus": city_status,
         "model": model,
         "proxy": proxy_info,
+        "account": account_info,
         "answer": structured["answer"],
         "reasoningContent": structured["reasoningContent"],
         "searchQueries": structured["searchQueries"],
