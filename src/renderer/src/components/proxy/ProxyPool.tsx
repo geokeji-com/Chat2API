@@ -6,13 +6,20 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/hooks/use-toast'
 import type { ProxyNode } from '@/types/electron'
 import { parseProxyImportText } from '../../../../shared/proxyImport'
-import { Activity, Clipboard, Edit, MapPin, Network, Plus, RefreshCw, Rows3, Trash2 } from 'lucide-react'
+import { Activity, ChevronLeft, ChevronRight, Clipboard, Edit, MapPin, Network, Plus, RefreshCw, Rows3, Trash2 } from 'lucide-react'
 
 interface ProxyNodeForm {
   name: string
@@ -38,6 +45,9 @@ const emptyForm: ProxyNodeForm = {
   enabled: true,
 }
 
+const PAGE_SIZE_OPTIONS = [10, 20, 50] as const
+const DEFAULT_PAGE_SIZE = 10
+
 function maskHost(node: ProxyNode): string {
   return `${node.host}:${node.port}`
 }
@@ -52,6 +62,8 @@ export function ProxyPool() {
   const [nodes, setNodes] = useState<ProxyNode[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [testingId, setTestingId] = useState<string | null>(null)
+  const [testingPageIds, setTestingPageIds] = useState<Set<string>>(new Set())
+  const [isTestingCurrentPage, setIsTestingCurrentPage] = useState(false)
   const [resolvingGeoId, setResolvingGeoId] = useState<string | null>(null)
   const [isResolvingAllGeo, setIsResolvingAllGeo] = useState(false)
   const [editingNode, setEditingNode] = useState<ProxyNode | null>(null)
@@ -60,8 +72,18 @@ export function ProxyPool() {
   const [importDialogOpen, setImportDialogOpen] = useState(false)
   const [importText, setImportText] = useState('')
   const [isImporting, setIsImporting] = useState(false)
+  const [currentPage, setCurrentPage] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
 
   const importResult = useMemo(() => parseProxyImportText(importText), [importText])
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(nodes.length / pageSize)), [nodes.length, pageSize])
+  const safeCurrentPage = Math.min(currentPage, totalPages)
+  const currentPageNodes = useMemo(() => {
+    const startIndex = (safeCurrentPage - 1) * pageSize
+    return nodes.slice(startIndex, startIndex + pageSize)
+  }, [nodes, safeCurrentPage, pageSize])
+  const pageStart = nodes.length === 0 ? 0 : (safeCurrentPage - 1) * pageSize + 1
+  const pageEnd = nodes.length === 0 ? 0 : Math.min(safeCurrentPage * pageSize, nodes.length)
 
   const loadNodes = async () => {
     setIsLoading(true)
@@ -81,6 +103,12 @@ export function ProxyPool() {
   useEffect(() => {
     void loadNodes()
   }, [])
+
+  useEffect(() => {
+    if (currentPage !== safeCurrentPage) {
+      setCurrentPage(safeCurrentPage)
+    }
+  }, [currentPage, safeCurrentPage])
 
   const openCreateDialog = () => {
     setEditingNode(null)
@@ -188,6 +216,59 @@ export function ProxyPool() {
     } finally {
       setTestingId(null)
     }
+  }
+
+  const testCurrentPage = async () => {
+    const targetNodes = [...currentPageNodes]
+    if (targetNodes.length === 0) return
+
+    setIsTestingCurrentPage(true)
+    setTestingPageIds(new Set(targetNodes.map(node => node.id)))
+    try {
+      const results = await Promise.all(targetNodes.map(async (node) => {
+        try {
+          const result = await window.electronAPI.proxyPool.test(node.id)
+          if (result.node) {
+            setNodes(prev => prev.map(item => item.id === result.node!.id ? result.node! : item))
+          }
+          return result
+        } catch (error) {
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : t('proxyPool.testFailed'),
+          }
+        } finally {
+          setTestingPageIds(prev => {
+            const next = new Set(prev)
+            next.delete(node.id)
+            return next
+          })
+        }
+      }))
+
+      const successCount = results.filter(result => result.success).length
+      const failedCount = results.length - successCount
+      toast({
+        title: t('proxyPool.testPageComplete'),
+        description: t('proxyPool.testPageResult', {
+          success: successCount,
+          failed: failedCount,
+        }),
+        variant: failedCount > 0 ? 'destructive' : 'default',
+      })
+    } finally {
+      setIsTestingCurrentPage(false)
+      setTestingPageIds(new Set())
+    }
+  }
+
+  const changePage = (page: number) => {
+    setCurrentPage(Math.min(Math.max(page, 1), totalPages))
+  }
+
+  const changePageSize = (value: string) => {
+    setPageSize(Number(value))
+    setCurrentPage(1)
   }
 
   const resolveNodeGeo = async (node: ProxyNode, force: boolean = false) => {
@@ -302,6 +383,15 @@ export function ProxyPool() {
             <Button variant="outline" size="sm" onClick={loadNodes} disabled={isLoading}>
               <RefreshCw className="h-4 w-4" />
             </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={testCurrentPage}
+              disabled={isLoading || testingId !== null || isTestingCurrentPage || currentPageNodes.length === 0}
+            >
+              <Activity className={`h-4 w-4 mr-2 ${isTestingCurrentPage ? 'animate-pulse' : ''}`} />
+              {isTestingCurrentPage ? t('proxyPool.testingPage') : t('proxyPool.testCurrentPage')}
+            </Button>
             <Button variant="outline" size="sm" onClick={resolveAllGeo} disabled={isResolvingAllGeo || nodes.length === 0}>
               <MapPin className="h-4 w-4 mr-2" />
               {isResolvingAllGeo ? t('proxyPool.geoResolving') : t('proxyPool.resolveGeo')}
@@ -323,62 +413,120 @@ export function ProxyPool() {
         <CardDescription>{t('proxyPool.description')}</CardDescription>
       </CardHeader>
       <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>{t('proxyPool.node')}</TableHead>
-              <TableHead>{t('proxyPool.location')}</TableHead>
-              <TableHead>{t('proxyPool.status')}</TableHead>
-              <TableHead>{t('proxyPool.failures')}</TableHead>
-              <TableHead className="text-right">{t('common.actions')}</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {nodes.map(node => (
-              <TableRow key={node.id}>
-                <TableCell>
-                  <div className="font-medium">{node.name}</div>
-                  <div className="text-xs text-muted-foreground">{maskHost(node)}</div>
-                </TableCell>
-                <TableCell className="text-sm text-muted-foreground">
-                  {formatLocation(node) || '-'}
-                </TableCell>
-                <TableCell>
-                  <Badge variant={node.status === 'active' ? 'default' : 'secondary'}>
-                    {t(`proxyPool.statuses.${node.status}`)}
-                  </Badge>
-                </TableCell>
-                <TableCell>{node.failureCount || 0}</TableCell>
-                <TableCell>
-                  <div className="flex justify-end gap-1">
-                    <Button variant="ghost" size="icon" onClick={() => testNode(node)} disabled={testingId === node.id}>
-                      <Activity className="h-4 w-4" />
-                    </Button>
-                    <Button variant="ghost" size="icon" onClick={() => resolveNodeGeo(node, true)} disabled={resolvingGeoId === node.id}>
-                      <MapPin className="h-4 w-4" />
-                    </Button>
-                    <Button variant="ghost" size="icon" onClick={() => toggleNode(node)}>
-                      <RefreshCw className={`h-4 w-4 ${node.enabled ? '' : 'opacity-40'}`} />
-                    </Button>
-                    <Button variant="ghost" size="icon" onClick={() => openEditDialog(node)}>
-                      <Edit className="h-4 w-4" />
-                    </Button>
-                    <Button variant="ghost" size="icon" onClick={() => deleteNode(node)}>
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </TableCell>
-              </TableRow>
-            ))}
-            {nodes.length === 0 && (
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
-                  {t('proxyPool.empty')}
-                </TableCell>
+                <TableHead>{t('proxyPool.node')}</TableHead>
+                <TableHead>{t('proxyPool.location')}</TableHead>
+                <TableHead>{t('proxyPool.status')}</TableHead>
+                <TableHead>{t('proxyPool.failures')}</TableHead>
+                <TableHead className="text-right">{t('common.actions')}</TableHead>
               </TableRow>
-            )}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {currentPageNodes.map(node => {
+                const isTestingNode = testingId === node.id || testingPageIds.has(node.id)
+
+                return (
+                  <TableRow key={node.id}>
+                    <TableCell>
+                      <div className="font-medium">{node.name}</div>
+                      <div className="text-xs text-muted-foreground">{maskHost(node)}</div>
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {formatLocation(node) || '-'}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={node.status === 'active' ? 'default' : 'secondary'}>
+                        {t(`proxyPool.statuses.${node.status}`)}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>{node.failureCount || 0}</TableCell>
+                    <TableCell>
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => testNode(node)}
+                          disabled={isTestingNode || isTestingCurrentPage}
+                          title={t('proxyPool.testNode')}
+                        >
+                          <Activity className={`h-4 w-4 ${isTestingNode ? 'animate-pulse' : ''}`} />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => resolveNodeGeo(node, true)} disabled={resolvingGeoId === node.id}>
+                          <MapPin className="h-4 w-4" />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => toggleNode(node)}>
+                          <RefreshCw className={`h-4 w-4 ${node.enabled ? '' : 'opacity-40'}`} />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => openEditDialog(node)}>
+                          <Edit className="h-4 w-4" />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => deleteNode(node)}>
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+              {nodes.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                    {t('proxyPool.empty')}
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+
+        {nodes.length > 0 && (
+          <div className="mt-4 flex flex-col gap-3 border-t pt-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="text-sm text-muted-foreground">
+              {t('proxyPool.pageRange', { start: pageStart, end: pageEnd, total: nodes.length })}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-muted-foreground">{t('proxyPool.pageSize')}</span>
+                <Select value={String(pageSize)} onValueChange={changePageSize}>
+                  <SelectTrigger className="h-8 w-[90px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {PAGE_SIZE_OPTIONS.map(option => (
+                      <SelectItem key={option} value={String(option)}>
+                        {option}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => changePage(safeCurrentPage - 1)}
+                  disabled={safeCurrentPage === 1}
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
+                <span className="min-w-[96px] text-center text-sm text-muted-foreground">
+                  {t('proxyPool.pageInfo', { current: safeCurrentPage, total: totalPages })}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => changePage(safeCurrentPage + 1)}
+                  disabled={safeCurrentPage === totalPages}
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </CardContent>
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
