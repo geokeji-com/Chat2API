@@ -412,32 +412,14 @@ export class ProxyPoolManager {
   handleProxyFailure(account: Account, provider: Provider, proxyNode: ProxyNode | undefined, error: unknown): ProxyFailureResult {
     const message = error instanceof Error ? error.message : String(error)
 
-    if (proxyNode) {
-      this.markNodeFailed(proxyNode.id, message)
-    }
+    storeManager.addLog('warn', `Proxy request failed for account ${account.name}; keeping current proxy binding`, {
+      accountId: account.id,
+      providerId: provider.id,
+      proxyId: proxyNode?.id,
+      data: { error: message },
+    })
 
-    if (normalizeProxyMode(account.proxyMode) !== 'auto') {
-      return { account, proxyNode, switched: false, error: message }
-    }
-
-    const nextProxyNode = this.selectAvailableNode(provider.id, account.id, proxyNode?.id)
-    if (!nextProxyNode) {
-      storeManager.addLog('warn', `Proxy pool exhausted for account ${account.name}; no proxy switch available`, {
-        accountId: account.id,
-        providerId: provider.id,
-        proxyId: proxyNode?.id,
-        data: { error: message },
-      })
-      return {
-        account,
-        proxyNode,
-        switched: false,
-        error: message,
-      }
-    }
-
-    const updated = this.bindAccount(account, nextProxyNode, true)
-    return { account: updated, proxyNode: nextProxyNode, switched: true, error: message }
+    return { account, proxyNode, switched: false, error: message }
   }
 
   markNodeSuccess(proxyId: string): void {

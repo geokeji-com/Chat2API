@@ -468,7 +468,6 @@ export class RequestForwarder {
         lastFailureType = result.failureType
 
         if (result.failureType === 'proxy') {
-          proxyPoolManager.markNodeFailed(currentProxyNode.id, result.error || 'Proxy transport failed')
           break
         }
 
@@ -479,7 +478,6 @@ export class RequestForwarder {
         lastError = error instanceof Error ? error.message : 'Unknown error'
         lastFailureType = isLikelyProxyTransportError(error) ? 'proxy' : 'unknown'
         if (isLikelyProxyTransportError(error)) {
-          proxyPoolManager.markNodeFailed(currentProxyNode.id, lastError)
           break
         }
       }
